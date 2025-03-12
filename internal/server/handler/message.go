@@ -12,7 +12,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	threadID := c.Query("thread_id")
 
 	if threadID == "" {
-		c.JSON(http.StatusOK, []interface{}{})
+		c.JSON(http.StatusOK, []any{})
 		return
 	}
 

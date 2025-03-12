@@ -32,7 +32,7 @@ type TaskThread struct {
 func NewOrchestrator() *Orchestrator {
 	return &Orchestrator{
 		agents:        make(map[string]domain.Agent),
-		messageQueue:  make(chan domain.Message),
+		messageQueue:  make(chan domain.Message, 100),
 		activeThreads: make(map[uuid.UUID]*TaskThread),
 		subscribers:   make(map[chan domain.Message]bool),
 	}
@@ -47,8 +47,14 @@ func (o *Orchestrator) RegisterAgent(agent domain.Agent) {
 	log.Printf("Agent registered %s (%s)", agent.Name(), agent.ID())
 }
 
+// TaskInfo represents the output of StartTask
+type TaskInfo struct {
+	TaskID   uuid.UUID
+	ThreadID uuid.UUID
+}
+
 // StartTask initiates a new task with the given details
-func (o *Orchestrator) StartTask(taskDetails map[string]any) uuid.UUID {
+func (o *Orchestrator) StartTask(taskDetails map[string]any) TaskInfo {
 	thread := &TaskThread{
 		TaskID:         uuid.New(),
 		ThreadID:       uuid.New(),
@@ -91,7 +97,10 @@ func (o *Orchestrator) StartTask(taskDetails map[string]any) uuid.UUID {
 		o.broadcast(*taskMsg)
 	}
 
-	return thread.TaskID
+	return TaskInfo{
+		TaskID:   thread.TaskID,
+		ThreadID: thread.ThreadID,
+	}
 }
 
 // StartProcessing begins the message handling loop
@@ -132,6 +141,8 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 		log.Printf("Warning: No agent found for recipient %s", msg.Recipient)
 		return
 	}
+
+	recipient.SetStatus(domain.AgentBusy)
 
 	responses := recipient.ProcessMessage(msg)
 
@@ -200,7 +211,7 @@ func (o *Orchestrator) handleTaskCompletion(msg domain.Message) {
 
 // Subscribe adds a new channel to receive message broadcasts
 func (o *Orchestrator) Subscribe() chan domain.Message {
-	ch := make(chan domain.Message)
+	ch := make(chan domain.Message, 100)
 
 	o.mu.Lock()
 	o.subscribers[ch] = true
@@ -224,12 +235,7 @@ func (o *Orchestrator) broadcast(msg domain.Message) {
 	defer o.mu.RUnlock()
 
 	for ch := range o.subscribers {
-		select {
-		case ch <- msg:
-			log.Printf("message sent sucessfully: %+v\n", msg)
-		default:
-			log.Println("Warning: subscriber channel buffer full, message skipped")
-		}
+		ch <- msg
 	}
 }
 

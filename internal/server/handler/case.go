@@ -27,15 +27,18 @@ func (h *Handler) StartCase(c *gin.Context) {
 		return
 	}
 
-	taskID := h.orchestrator.StartTask(map[string]any{
+	task := h.orchestrator.StartTask(map[string]any{
 		"patient_data": caseData,
 		"scenario":     caseID,
 	})
 
+	h.caseRepository.SetCurrentCase(caseData)
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":       "started",
 		"case_id":      caseID,
-		"task_id":      taskID,
+		"task_id":      task.TaskID,
+		"thread_id":    task.ThreadID,
 		"patient_name": caseData["name"],
 	})
 }
