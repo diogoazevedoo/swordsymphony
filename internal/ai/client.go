@@ -2,7 +2,6 @@ package ai
 
 import (
 	"errors"
-	"os"
 )
 
 // Provider represents an AI model provider
@@ -38,10 +37,9 @@ type CompletionResponse struct {
 }
 
 // NewClient creates an AI client for the specified provider
-func NewClient(provider Provider) (Client, error) {
+func NewClient(provider Provider, apiKey string) (Client, error) {
 	switch provider {
 	case OpenAI:
-		apiKey := os.Getenv("OPENAI_API_KEY")
 		if apiKey == "" {
 			return nil, errors.New("OPENAI_API_KEY environment variable is not set")
 		}
