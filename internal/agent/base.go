@@ -4,12 +4,11 @@ import (
 	"sync"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
-	"github.com/google/uuid"
 )
 
 // BaseAgent provides common functionality for all agents
 type BaseAgent struct {
-	id        uuid.UUID
+	id        string
 	name      string
 	status    domain.AgentStatus
 	mu        sync.RWMutex
@@ -17,7 +16,7 @@ type BaseAgent struct {
 }
 
 // NewBaseAgent creates a new base agent
-func NewBaseAgent(id uuid.UUID, name string) BaseAgent {
+func NewBaseAgent(id string, name string) BaseAgent {
 	return BaseAgent{
 		id:        id,
 		name:      name,
@@ -27,7 +26,7 @@ func NewBaseAgent(id uuid.UUID, name string) BaseAgent {
 }
 
 // ID returns the agent's unique identifier
-func (a *BaseAgent) ID() uuid.UUID {
+func (a *BaseAgent) ID() string {
 	return a.id
 }
 

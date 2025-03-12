@@ -21,7 +21,7 @@ const (
 // Message represents communication between agents
 type Message struct {
 	ID               uuid.UUID      `json:"id"`
-	ThreadID         string         `json:"thread_id"`
+	ThreadID         uuid.UUID      `json:"thread_id"`
 	Sender           string         `json:"sender"`
 	SenderName       string         `json:"sender_name"`
 	Recipient        string         `json:"recipient"`
@@ -40,7 +40,7 @@ func NewMessage(
 ) *Message {
 	return &Message{
 		ID:               uuid.New(),
-		ThreadID:         "", // Set by orchestrator
+		ThreadID:         uuid.Nil, // Set by orchestrator
 		Sender:           sender,
 		SenderName:       senderName,
 		Recipient:        recipient,

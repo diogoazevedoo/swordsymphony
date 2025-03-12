@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
-	"github.com/google/uuid"
 )
 
 // IntakeAgent processes and normalizes patient data
@@ -13,7 +12,7 @@ type IntakeAgent struct {
 }
 
 // NewIntakeAgent creates a new intake agent
-func NewIntakeAgent(id uuid.UUID, name string) *IntakeAgent {
+func NewIntakeAgent(id string, name string) *IntakeAgent {
 	return &IntakeAgent{
 		BaseAgent: NewBaseAgent(id, name),
 	}
@@ -39,7 +38,7 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses := []domain.Message{
 		// Status update to orchestrator
 		*domain.NewMessage(
-			a.ID().String(),
+			a.ID(),
 			a.Name(),
 			"orchestrator",
 			domain.StatusUpdate,
@@ -53,7 +52,7 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 
 		// Send data to diagnostic agent
 		*domain.NewMessage(
-			a.ID().String(),
+			a.ID(),
 			a.Name(),
 			"diagnostic_agent",
 			domain.ProcessedData,
@@ -68,7 +67,7 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 
 		// Task completion notification
 		*domain.NewMessage(
-			a.ID().String(),
+			a.ID(),
 			a.Name(),
 			"orchestrator",
 			domain.TaskComplete,

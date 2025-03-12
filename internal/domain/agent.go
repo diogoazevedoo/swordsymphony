@@ -1,7 +1,5 @@
 package domain
 
-import "github.com/google/uuid"
-
 // AgentStatus represents the current state of an agent
 type AgentStatus string
 
@@ -15,7 +13,7 @@ const (
 // Agent defines the interface that all agents must implement
 type Agent interface {
 	// ID returns the unique identifier for this agent
-	ID() uuid.UUID
+	ID() string
 
 	// Name returns the human-readable name of this agent
 	Name() string
