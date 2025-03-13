@@ -9,6 +9,7 @@ import (
 func (s *Server) SetupRoutes(h *handler.Handler) {
 	s.router.Use(middleware.CORS())
 	s.router.Use(middleware.RequestLogger())
+	s.router.Use(middleware.Recovery())
 
 	s.router.GET("/health", h.HealthCheck)
 
