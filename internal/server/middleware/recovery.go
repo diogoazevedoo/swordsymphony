@@ -5,26 +5,41 @@ import (
 	"net/http"
 	"runtime/debug"
 
+	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/gin-gonic/gin"
 )
 
 // Recovery middleware handles panics and provides graceful recovery
 func Recovery() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
+	return func(c *gin.Context) {
 		defer func() {
-			if err := recover(); err != nil {
+			if r := recover(); r != nil {
 				stackTrace := debug.Stack()
 
-				fmt.Printf("Panic recovered: %v\n%s", err, stackTrace)
+				fmt.Printf("Panic recovered: %v\n%s", r, stackTrace)
 
-				ctx.JSON(http.StatusInternalServerError, gin.H{
-					"error": "An internal server error occurred",
-					"code":  "internal_error",
-				})
+				var statusCode int
+				var errorResponse gin.H
 
-				ctx.Abort()
+				switch err := r.(type) {
+				case *errors.AppError:
+					statusCode = err.HTTPStatusCode()
+					errorResponse = gin.H{
+						"error": err.Message,
+						"code":  err.Code,
+					}
+				default:
+					statusCode = http.StatusInternalServerError
+					errorResponse = gin.H{
+						"error": "An internal server error occurred",
+						"code":  "internal_error",
+					}
+				}
+
+				c.JSON(statusCode, errorResponse)
+				c.Abort()
 			}
 		}()
-		ctx.Next()
+		c.Next()
 	}
 }

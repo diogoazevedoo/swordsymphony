@@ -3,67 +3,44 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/diogoazevedoo/swordsymphony/internal/agent"
-	"github.com/diogoazevedoo/swordsymphony/internal/ai"
-	"github.com/diogoazevedoo/swordsymphony/internal/knowledge"
-	"github.com/diogoazevedoo/swordsymphony/internal/orchestrator"
-	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
-	"github.com/diogoazevedoo/swordsymphony/internal/server"
-	"github.com/diogoazevedoo/swordsymphony/internal/server/handler"
+	"github.com/diogoazevedoo/swordsymphony/internal/app"
+	"github.com/diogoazevedoo/swordsymphony/internal/config"
 	"github.com/joho/godotenv"
 )
 
 func init() {
 	err := godotenv.Load()
 	if err != nil {
-		panic(err)
+		log.Println("Warning: No .env file found")
 	}
 }
 
 func main() {
-	openAIKey := os.Getenv("OPENAI_API_KEY")
-	if openAIKey == "" {
-		log.Fatal("OPENAI_API_KEY must exist")
-	}
-
-	aiClient, err := ai.NewClient(ai.Provider("openai"), openAIKey)
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Warning: failed to initialize AI client: %v", err)
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	medicalKB, err := knowledge.NewMedicalKnowledgeBase("")
+	application, err := app.NewApplication(cfg)
 	if err != nil {
-		log.Fatalf("Warning: failed to load medical knowledge base: %v", err)
+		log.Fatalf("Failed to initialize application: %v", err)
 	}
 
-	caseRepo := memory.NewCaseRepository()
-	resultRepo := memory.NewResultRepository()
+	go func() {
+		if err := application.Start(); err != nil {
+			log.Fatalf("Failed to start application: %v", err)
+		}
+	}()
 
-	err = caseRepo.InitializeDemoCases()
-	if err != nil {
-		log.Fatalf("Failed to initialize demo cases: %v", err)
-	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	orch := orchestrator.NewOrchestrator()
-
-	intakeAgent := agent.NewIntakeAgent("intake_agent", "Patient Intake Agent")
-	diagnosticAgent := agent.NewDiagnosticAgent("diagnostic_agent", "Diagnostic Agent", aiClient, medicalKB)
-	treatmentAgent := agent.NewTreatmentAgent("treatment_agent", "Treatment Agent", aiClient, medicalKB, resultRepo)
-
-	orch.RegisterAgent(intakeAgent)
-	orch.RegisterAgent(diagnosticAgent)
-	orch.RegisterAgent(treatmentAgent)
-
-	orch.StartProcessing()
-
-	h := handler.NewHandler(orch, caseRepo, resultRepo)
-
-	srv := server.NewServer(":8080")
-	srv.SetupRoutes(h)
-
-	log.Println("Starting Sword Symphony API on port :8080")
-	if err := srv.Start(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	log.Println("Shutting down gracefully...")
+	if err := application.Stop(); err != nil {
+		log.Fatalf("Error during shutdown: %v", err)
 	}
 }

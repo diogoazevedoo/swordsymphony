@@ -2,24 +2,30 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 )
 
 type openAIClient struct {
 	apiKey     string
 	httpClient *http.Client
+	baseURL    string
+	retries    int
 }
 
 func newOpenAIClient(apiKey string) *openAIClient {
 	return &openAIClient{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second,
 		},
+		baseURL: "https://api.openai.com/v1",
+		retries: 3,
 	}
 }
 
@@ -42,9 +48,14 @@ type openAIResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
 }
 
-// GenerateCompletion implements the AI Client interface
+// GenerateCompletion implements the AI Client interface with retry logic and better error handling
 func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptions) (CompletionResponse, error) {
 	model := "gpt-4"
 	if options.ModelName != "" {
@@ -69,12 +80,38 @@ func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptio
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{}, errors.Internal(fmt.Sprintf("failed to marshal request: %v", err), "ai_request_error")
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	var result CompletionResponse
+	var apiErr error
+
+	for attempt := 0; attempt <= c.retries; attempt++ {
+		if attempt > 0 {
+			backoffDuration := time.Duration(attempt*attempt) * 500 * time.Millisecond
+			time.Sleep(backoffDuration)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		result, apiErr = c.doRequest(ctx, jsonData, model)
+		if apiErr == nil {
+			return result, nil
+		}
+
+		if !isTransientError(apiErr) {
+			break
+		}
+	}
+
+	return CompletionResponse{}, apiErr
+}
+
+func (c *openAIClient) doRequest(ctx context.Context, jsonData []byte, model string) (CompletionResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{}, errors.Internal(fmt.Sprintf("failed to create request: %v", err), "ai_request_error")
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -82,21 +119,37 @@ func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptio
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{}, errors.External(err, "OpenAI API request failed", "ai_connection_error")
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CompletionResponse{}, fmt.Errorf("OpenAI API returned status code %d", resp.StatusCode)
-	}
-
 	var openAIResp openAIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{}, errors.External(err, "Failed to decode OpenAI response", "ai_decode_error")
+	}
+
+	if openAIResp.Error != nil {
+		return CompletionResponse{}, errors.External(
+			fmt.Errorf("%s: %s", openAIResp.Error.Type, openAIResp.Error.Message),
+			"OpenAI API returned an error",
+			openAIResp.Error.Code,
+		)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return CompletionResponse{}, errors.External(
+			fmt.Errorf("status code %d", resp.StatusCode),
+			"OpenAI API returned an unexpected status code",
+			"ai_status_error",
+		)
 	}
 
 	if len(openAIResp.Choices) == 0 {
-		return CompletionResponse{}, errors.New("no completion choices returned from OpenAI")
+		return CompletionResponse{}, errors.External(
+			fmt.Errorf("no choices returned"),
+			"OpenAI API returned no completion choices",
+			"ai_empty_response",
+		)
 	}
 
 	return CompletionResponse{
@@ -107,8 +160,16 @@ func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptio
 	}, nil
 }
 
+// isTransientError determines if an error is likely temporary and should be retried
+func isTransientError(err error) bool {
+	if appErr, ok := err.(*errors.AppError); ok {
+		return appErr.Type == errors.ErrorTypeExternal
+	}
+	return false
+}
+
 // GenerateEmbedding creates vector embeddings
 func (c *openAIClient) GenerateEmbedding(text string) ([]float64, error) {
-	// TODO: simplified for now
+	// TODO
 	return make([]float64, 1536), nil
 }
