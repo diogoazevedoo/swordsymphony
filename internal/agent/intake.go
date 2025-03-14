@@ -12,7 +12,7 @@ type IntakeAgent struct {
 }
 
 // NewIntakeAgent creates a new intake agent
-func NewIntakeAgent(id string, name string) *IntakeAgent {
+func NewIntakeAgent(id, name string) *IntakeAgent {
 	return &IntakeAgent{
 		BaseAgent: NewBaseAgent(id, name),
 	}
@@ -56,7 +56,7 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 			a.Name(),
 			"diagnostic_agent",
 			domain.ProcessedData,
-			map[string]interface{}{
+			map[string]any{
 				"task_id":    taskID,
 				"data":       processedData,
 				"context":    "Patient intake complete",
@@ -71,7 +71,7 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 			a.Name(),
 			"orchestrator",
 			domain.TaskComplete,
-			map[string]interface{}{
+			map[string]any{
 				"task_id": taskID,
 				"status":  "completed",
 				"message": "Patient data processing complete",

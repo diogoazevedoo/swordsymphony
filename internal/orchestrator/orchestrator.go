@@ -133,6 +133,10 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 		return
 	}
 
+	if msg.Recipient == "orchestrator" {
+		return
+	}
+
 	o.mu.RLock()
 	recipient, exists := o.agents[msg.Recipient]
 	o.mu.RUnlock()
@@ -143,7 +147,6 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 	}
 
 	recipient.SetStatus(domain.AgentBusy)
-
 	responses := recipient.ProcessMessage(msg)
 
 	for _, response := range responses {
@@ -189,7 +192,7 @@ func (o *Orchestrator) handleTaskCompletion(msg domain.Message) {
 	}
 
 	if allComplete {
-		thread.Status = "Completed"
+		thread.Status = "completed"
 
 		completionMsg := domain.NewMessage(
 			"orchestrator",
@@ -197,7 +200,7 @@ func (o *Orchestrator) handleTaskCompletion(msg domain.Message) {
 			"all",
 			domain.TaskComplete,
 			map[string]any{
-				"task_id": taskID,
+				"task_id": thread.TaskID,
 				"status":  "completed",
 				"message": "Task processing complete",
 				"summary": thread,

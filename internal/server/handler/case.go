@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/diogoazevedoo/swordsymphony/internal/domain"
 	"github.com/gin-gonic/gin"
 )
 
@@ -54,6 +55,19 @@ func (h *Handler) GetCaseStatus(c *gin.Context) {
 		return
 	}
 
+	allComplete := true
+	for _, status := range agentStatus {
+		if status != domain.AgentComplete {
+			allComplete = false
+			break
+		}
+	}
+
+	status := "processing"
+	if allComplete {
+		status = "completed"
+	}
+
 	progress := make(map[string]int)
 	for agent, status := range agentStatus {
 		switch status {
@@ -69,7 +83,7 @@ func (h *Handler) GetCaseStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":       "processing",
+		"status":       status,
 		"case_id":      currentCase["id"],
 		"patient_data": currentCase,
 		"agent_status": agentStatus,

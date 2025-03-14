@@ -49,7 +49,7 @@ func main() {
 
 	intakeAgent := agent.NewIntakeAgent("intake_agent", "Patient Intake Agent")
 	diagnosticAgent := agent.NewDiagnosticAgent("diagnostic_agent", "Diagnostic Agent", aiClient, medicalKB)
-	treatmentAgent := agent.NewTreatmentAgent("treatment_agent", "Treatment Agent", aiClient, medicalKB)
+	treatmentAgent := agent.NewTreatmentAgent("treatment_agent", "Treatment Agent", aiClient, medicalKB, resultRepo)
 
 	orch.RegisterAgent(intakeAgent)
 	orch.RegisterAgent(diagnosticAgent)

@@ -8,6 +8,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
 	"github.com/diogoazevedoo/swordsymphony/internal/knowledge"
+	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 )
 
 // TreatmentAgent develops treatment plans based on diagnoses
@@ -16,6 +17,7 @@ type TreatmentAgent struct {
 	treatmentPlans    map[string]any
 	aiClient          ai.Client
 	knowledgeBase     *knowledge.MedicalKnowledgeBase
+	resultRepository  repository.ResultRepository
 	treatmentTemplate string
 }
 
@@ -24,12 +26,14 @@ func NewTreatmentAgent(
 	id, name string,
 	aiClient ai.Client,
 	kb *knowledge.MedicalKnowledgeBase,
+	resultRepo repository.ResultRepository,
 ) *TreatmentAgent {
 	return &TreatmentAgent{
-		BaseAgent:      NewBaseAgent(id, name),
-		treatmentPlans: make(map[string]any),
-		aiClient:       aiClient,
-		knowledgeBase:  kb,
+		BaseAgent:        NewBaseAgent(id, name),
+		treatmentPlans:   make(map[string]any),
+		aiClient:         aiClient,
+		knowledgeBase:    kb,
+		resultRepository: resultRepo,
 		treatmentTemplate: `
 You are an experienced medical treatment specialist.
 Based on the following patient information and diagnosis, create a comprehensive treatment plan:
@@ -115,6 +119,23 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 
 	a.treatmentPlans[taskID] = treatmentPlan
 	a.UpdateKnowledge("current_treatment_plan", treatmentPlan)
+
+	resultRepo := a.resultRepository
+	if resultRepo != nil {
+		results := map[string]any{
+			"diagnosis":      diagnosis,
+			"treatment_plan": treatmentPlan,
+		}
+
+		caseID := ""
+		if id, ok := patientData["id"].(string); ok {
+			caseID = id
+		}
+
+		if caseID != "" {
+			resultRepo.StoreResults(caseID, results)
+		}
+	}
 
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
