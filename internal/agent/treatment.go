@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
@@ -128,12 +129,18 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 		}
 
 		caseID := ""
-		if id, ok := patientData["id"].(string); ok {
-			caseID = id
+		if patientData != nil {
+			if caseIdentifier, ok := patientData["case_id"].(string); ok && caseIdentifier != "" {
+				caseID = caseIdentifier
+			} else if id, ok := patientData["id"].(string); ok && id != "" {
+				caseID = id
+			}
 		}
 
 		if caseID != "" {
-			resultRepo.StoreResults(caseID, results)
+			if err := resultRepo.StoreResults(caseID, results); err != nil {
+				log.Printf("Failed to store results: %v", err)
+			}
 		}
 	}
 

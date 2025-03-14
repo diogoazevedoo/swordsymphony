@@ -6,3 +6,6 @@ run:
 
 test:
 	go test -v ./...
+
+migrate:
+	go run ./cmd/migrate -config=.env -migrations=./internal/migrations

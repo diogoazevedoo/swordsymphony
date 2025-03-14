@@ -28,6 +28,10 @@ func (h *Handler) StartCase(c *gin.Context) {
 		return
 	}
 
+	if caseData != nil {
+		caseData["case_id"] = caseID
+	}
+
 	task := h.orchestrator.StartTask(map[string]any{
 		"patient_data": caseData,
 		"scenario":     caseID,

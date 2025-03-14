@@ -11,6 +11,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/orchestrator"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
+	"github.com/diogoazevedoo/swordsymphony/internal/repository/postgres"
 	"github.com/diogoazevedoo/swordsymphony/internal/server"
 	"github.com/diogoazevedoo/swordsymphony/internal/server/handler"
 )
@@ -19,6 +20,7 @@ import (
 type Application struct {
 	Config        *config.Config
 	AIClient      ai.Client
+	DB            *postgres.DB
 	KnowledgeBase *knowledge.MedicalKnowledgeBase
 	CaseRepo      repository.CaseRepository
 	ResultRepo    repository.ResultRepository
@@ -30,6 +32,10 @@ type Application struct {
 func NewApplication(cfg *config.Config) (*Application, error) {
 	app := &Application{
 		Config: cfg,
+	}
+
+	if err := app.initDatabase(); err != nil {
+		log.Printf("Warning: Failed to connect to database: %v. Using in-memory storage instead.", err)
 	}
 
 	if err := app.initAIClient(); err != nil {
@@ -55,6 +61,18 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 	return app, nil
 }
 
+// Initialize database connection
+func (a *Application) initDatabase() error {
+	var err error
+	a.DB, err = postgres.NewDB(a.Config.Database)
+	if err != nil {
+		return err
+	}
+
+	log.Println("Successfully connected to database")
+	return nil
+}
+
 // Initialize AI client
 func (a *Application) initAIClient() error {
 	var err error
@@ -71,8 +89,17 @@ func (a *Application) initKnowledgeBase() error {
 
 // Initialize repositories
 func (a *Application) initRepositories() error {
-	a.CaseRepo = memory.NewCaseRepository()
-	a.ResultRepo = memory.NewResultRepository()
+	if a.DB != nil {
+		a.CaseRepo = postgres.NewCaseRepository(a.DB)
+		a.ResultRepo = postgres.NewResultRepository(a.DB)
+
+		log.Println("Using PostgreSQL repositories")
+	} else {
+		a.CaseRepo = memory.NewCaseRepository()
+		a.ResultRepo = memory.NewResultRepository()
+
+		log.Println("Using in-memory repositories")
+	}
 
 	if err := a.CaseRepo.InitializeDemoCases(); err != nil {
 		return fmt.Errorf("failed to initialize demo cases: %w", err)
@@ -117,6 +144,22 @@ func (a *Application) Start() error {
 
 // Stop gracefully shuts down the application
 func (a *Application) Stop() error {
-	// TODO
+	log.Println("Stopping application...")
+
+	if a.DB != nil {
+		log.Println("Closing database connection...")
+		if err := a.DB.Close(); err != nil {
+			log.Printf("Error closing database connection: %v", err)
+		}
+	}
+
+	if a.Server != nil {
+		log.Println("Shutting down server...")
+		if err := a.Server.Shutdown(); err != nil {
+			log.Printf("Error shutting down server: %v", err)
+		}
+	}
+
+	log.Println("Application stopped")
 	return nil
 }
