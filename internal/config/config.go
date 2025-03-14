@@ -47,7 +47,6 @@ type MedicalConfig struct {
 
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
-	// Server config
 	port := getEnv("PORT", "8080")
 	readTimeoutStr := getEnv("SERVER_READ_TIMEOUT", "5")
 	writeTimeoutStr := getEnv("SERVER_WRITE_TIMEOUT", "10")
