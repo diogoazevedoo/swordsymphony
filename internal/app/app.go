@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/agent"
 	"github.com/diogoazevedoo/swordsymphony/internal/config"
@@ -17,6 +18,7 @@ type Application struct {
 	container    *Container
 	orchestrator *orchestrator.Orchestrator
 	server       *server.Server
+	isShutdown   bool
 }
 
 // NewApplication creates and initializes a new application
@@ -78,17 +80,58 @@ func (a *Application) Start() error {
 
 // Stop gracefully shuts down the application
 func (a *Application) Stop() error {
-	logger.Info("Stopping application")
+	if a.isShutdown {
+		logger.Warn("Application is already shutting down")
+		return nil
+	}
 
-	ctx := context.Background()
+	a.isShutdown = true
+	logger.Info("Starting graceful shutdown")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	serverDone := make(chan struct{})
+	orchestratorDone := make(chan struct{})
 
 	if a.server != nil {
-		logger.Info("Shutting down server")
-		if err := a.server.Shutdown(ctx); err != nil {
-			logger.Error("Error shutting down server", "error", err)
+		go func() {
+			logger.Info("Shutting down HTTP server")
+			if err := a.server.Shutdown(shutdownCtx); err != nil {
+				logger.Error("Error shutting down server", "error", err)
+			}
+			close(serverDone)
+		}()
+	} else {
+		close(serverDone)
+	}
+
+	if a.orchestrator != nil {
+		go func() {
+			logger.Info("Shutting down orchestrator")
+			if err := a.orchestrator.Shutdown(shutdownCtx); err != nil {
+				logger.Error("Error shutting down orchestrator", "error", err)
+			}
+			close(orchestratorDone)
+		}()
+	} else {
+		close(orchestratorDone)
+	}
+
+	select {
+	case <-shutdownCtx.Done():
+		logger.Warn("Shutdown timed out, forcing exit")
+		return fmt.Errorf("shutdown timed out")
+	case <-serverDone:
+		logger.Info("HTTP server shutdown complete")
+		select {
+		case <-shutdownCtx.Done():
+			return fmt.Errorf("shutdown timed out after server")
+		case <-orchestratorDone:
+			logger.Info("Orchestrator shutdown complete")
 		}
 	}
 
-	logger.Info("Application stopped")
+	logger.Info("Application shutdown complete")
 	return nil
 }

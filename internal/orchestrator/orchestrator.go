@@ -288,3 +288,33 @@ func (o *Orchestrator) GetAgentStatus() map[string]domain.AgentStatus {
 
 	return status
 }
+
+// Shutdown stops the orchestrator gracefully
+func (o *Orchestrator) Shutdown(ctx context.Context) error {
+	logger.Info("Orchestrator is shutting down")
+
+	close(o.messageQueue)
+
+	shutdownMsg := domain.NewMessage(
+		string(domain.OrchestratorAgentType),
+		"Orchestrator",
+		"all",
+		domain.StatusUpdate,
+		map[string]any{
+			"status":  "shutting_down",
+			"message": "System is shutting down",
+		},
+	)
+
+	o.broadcast(*shutdownMsg)
+
+	o.mu.Lock()
+	for ch := range o.subscribers {
+		close(ch)
+	}
+	o.subscribers = make(map[chan domain.Message]bool)
+	o.mu.Unlock()
+
+	logger.Info("Orchestrator shutdown complete")
+	return nil
+}
