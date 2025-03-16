@@ -1,9 +1,10 @@
 package memory
 
 import (
-	"errors"
 	"maps"
 	"sync"
+
+	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 )
 
 // CaseRepository is an in-memory implementation of the CaseRepository interface
@@ -25,6 +26,10 @@ func (r *CaseRepository) GetDemoCases() (map[string]map[string]any, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	if len(r.cases) == 0 {
+		return nil, errors.NotFound("No demo cases available", "no_demo_cases")
+	}
+
 	result := make(map[string]map[string]any)
 	maps.Copy(result, r.cases)
 
@@ -38,7 +43,7 @@ func (r *CaseRepository) GetCaseByID(id string) (map[string]any, error) {
 
 	caseData, exists := r.cases[id]
 	if !exists {
-		return nil, errors.New("case not found")
+		return nil, errors.NotFound("case not found", "case_not_found")
 	}
 
 	return caseData, nil

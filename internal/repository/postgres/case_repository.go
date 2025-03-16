@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
+
+	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 )
 
 // CaseRepository is a PostgreSQL implementation of the CaseRepository interface
@@ -29,14 +30,14 @@ func (r *CaseRepository) GetDemoCases() (map[string]map[string]any, error) {
 	defer cancel()
 
 	query := `
-		SELECT id, data 
-		FROM cases 
-		WHERE is_demo = true
-	`
+        SELECT id, data 
+        FROM cases 
+        WHERE is_demo = true
+    `
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query demo cases: %w", err)
+		return nil, errors.External(err, "Failed to query demo cases", "db_query_error")
 	}
 	defer rows.Close()
 
@@ -46,19 +47,23 @@ func (r *CaseRepository) GetDemoCases() (map[string]map[string]any, error) {
 		var dataJSON []byte
 
 		if err := rows.Scan(&id, &dataJSON); err != nil {
-			return nil, fmt.Errorf("failed to scan case row: %w", err)
+			return nil, errors.External(err, "Failed to scan case row", "db_scan_error")
 		}
 
 		var caseData map[string]any
 		if err := json.Unmarshal(dataJSON, &caseData); err != nil {
-			return nil, fmt.Errorf("failed to decode JSON: %w", err)
+			return nil, errors.Internal("Failed to decode case data from JSON", "json_decode_error")
 		}
 
 		cases[id] = caseData
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating case rows: %w", err)
+		return nil, errors.External(err, "Error iterating case rows", "db_iteration_error")
+	}
+
+	if len(cases) == 0 {
+		return nil, errors.NotFound("No demo cases found", "no_demo_cases")
 	}
 
 	return cases, nil
@@ -66,27 +71,31 @@ func (r *CaseRepository) GetDemoCases() (map[string]map[string]any, error) {
 
 // GetCaseByID returns a specific case by ID
 func (r *CaseRepository) GetCaseByID(id string) (map[string]any, error) {
+	if id == "" {
+		return nil, errors.Validation("Case ID cannot be empty", "empty_case_id")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	query := `
-		SELECT data 
-		FROM cases 
-		WHERE id = $1
-	`
+        SELECT data 
+        FROM cases 
+        WHERE id = $1
+    `
 
 	var dataJSON []byte
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&dataJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("case not found")
+			return nil, errors.NotFound("Case not found", "case_not_found")
 		}
-		return nil, fmt.Errorf("failed to query case: %w", err)
+		return nil, errors.External(err, "Failed to query case from database", "db_query_error")
 	}
 
 	var caseData map[string]any
 	if err := json.Unmarshal(dataJSON, &caseData); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON: %w", err)
+		return nil, errors.Internal("Failed to decode case data from JSON", "json_decode_error")
 	}
 
 	return caseData, nil
@@ -117,9 +126,13 @@ func (r *CaseRepository) ClearCurrentCase() {
 func (r *CaseRepository) InitializeDemoCases() error {
 	cases, err := r.GetDemoCases()
 	if err != nil {
-		return fmt.Errorf("failed to check for existing demo cases: %w", err)
+		// Only proceed if the error is "no demo cases"
+		if appErr, ok := err.(*errors.AppError); !ok || appErr.Type != errors.ErrorTypeNotFound {
+			return errors.Wrap(err, errors.ErrorTypeInternal, "Failed to check for existing demo cases", "demo_case_check_error")
+		}
 	}
 
+	// If cases exist, we're done
 	if len(cases) > 0 {
 		return nil
 	}
@@ -129,7 +142,7 @@ func (r *CaseRepository) InitializeDemoCases() error {
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return errors.External(err, "Failed to begin transaction", "db_transaction_error")
 	}
 	defer tx.Rollback()
 
@@ -209,24 +222,24 @@ func (r *CaseRepository) InitializeDemoCases() error {
 	}
 
 	insertQuery := `
-		INSERT INTO cases (id, data, is_demo, created_at, updated_at)
-		VALUES ($1, $2, true, NOW(), NOW())
-	`
+        INSERT INTO cases (id, data, is_demo, created_at, updated_at)
+        VALUES ($1, $2, true, NOW(), NOW())
+    `
 
 	for _, demo := range demoCases {
 		dataJSON, err := json.Marshal(demo.data)
 		if err != nil {
-			return fmt.Errorf("failed to encode JSON: %w", err)
+			return errors.Internal("Failed to encode case data to JSON", "json_encode_error")
 		}
 
 		_, err = tx.ExecContext(ctx, insertQuery, demo.id, dataJSON)
 		if err != nil {
-			return fmt.Errorf("failed to insert demo case: %w", err)
+			return errors.External(err, "Failed to insert demo case", "db_insert_error")
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return errors.External(err, "Failed to commit transaction", "db_commit_error")
 	}
 
 	return nil
