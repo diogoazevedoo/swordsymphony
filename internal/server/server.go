@@ -69,11 +69,14 @@ func (s *Server) Start() error {
 }
 
 // Shutdown gracefully shuts down the server
-func (s *Server) Shutdown() error {
+func (s *Server) Shutdown(ctx context.Context) error {
 	logger.Info("Server is shutting down")
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
-	defer cancel()
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), s.shutdownTimeout)
+		defer cancel()
+	}
 
 	return s.http.Shutdown(ctx)
 }

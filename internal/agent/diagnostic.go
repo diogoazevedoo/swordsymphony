@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -65,7 +66,7 @@ Format your response as JSON with the following structure:
 }
 
 // ProcessMessage handles incoming messages for the diagnostic agent
-func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
+func (a *DiagnosticAgent) ProcessMessage(ctx context.Context, msg domain.Message) []domain.Message {
 	if msg.MessageType != domain.ProcessedData {
 		return nil
 	}
@@ -106,7 +107,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 		},
 	))
 
-	diagnosis := a.analyzeSymptoms(patientData)
+	diagnosis := a.analyzeSymptoms(ctx, patientData)
 
 	a.diagnoses[taskID] = diagnosis
 	a.UpdateKnowledge("current_diagnosis", diagnosis)
@@ -160,7 +161,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 }
 
 // analyzeSymptoms uses AI and knowledge base to analyze patient data
-func (a *DiagnosticAgent) analyzeSymptoms(patientData map[string]any) map[string]any {
+func (a *DiagnosticAgent) analyzeSymptoms(ctx context.Context, patientData map[string]any) map[string]any {
 	symptoms := getStringSlice(patientData, "symptoms")
 	conditions := getStringSlice(patientData, "conditions")
 	medications := getStringSlice(patientData, "medications")
@@ -222,7 +223,7 @@ func (a *DiagnosticAgent) analyzeSymptoms(patientData map[string]any) map[string
 		}
 	}
 
-	aiResponse, err := a.aiClient.GenerateCompletion(prompt, ai.CompletionOptions{
+	aiResponse, err := a.aiClient.GenerateCompletion(ctx, prompt, ai.CompletionOptions{
 		MaxTokens:    1024,
 		Temperature:  0.3,
 		ModelName:    "gpt-4",

@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"context"
 	"errors"
 )
 
@@ -14,10 +15,10 @@ const (
 // Client is an interface for interacting with AI models
 type Client interface {
 	// GenerateCompletion sends a prompt to an AI model and returns the completion
-	GenerateCompletion(prompt string, options CompletionOptions) (CompletionResponse, error)
+	GenerateCompletion(ctx context.Context, prompt string, options CompletionOptions) (CompletionResponse, error)
 
 	// GenerateEmbedding creates vector embeddings for text
-	GenerateEmbedding(text string) ([]float64, error)
+	GenerateEmbedding(ctx context.Context, text string) ([]float64, error)
 }
 
 // CompletionOptions contains parameters for the completion request
@@ -36,15 +37,29 @@ type CompletionResponse struct {
 	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
-// NewClient creates an AI client for the specified provider
-func NewClient(provider Provider, apiKey string) (Client, error) {
+// Factory is an interface for creating AI clients
+type Factory interface {
+	CreateClient(provider Provider, apiKey string) (Client, error)
+}
+
+// DefaultFactory is the default implementation of Factory
+type DefaultFactory struct{}
+
+// CreateClient creates an AI client for the specified provider
+func (f *DefaultFactory) CreateClient(provider Provider, apiKey string) (Client, error) {
 	switch provider {
 	case OpenAI:
 		if apiKey == "" {
-			return nil, errors.New("OPENAI_API_KEY environment variable is not set")
+			return nil, errors.New("OPENAI_API_KEY is not set")
 		}
-		return newOpenAIClient(apiKey), nil
+		return NewOpenAIClient(apiKey), nil
 	default:
 		return nil, errors.New("unsupported AI provider")
 	}
+}
+
+// NewClient creates an AI client for the specified provider using the default factory
+func NewClient(provider Provider, apiKey string) (Client, error) {
+	factory := &DefaultFactory{}
+	return factory.CreateClient(provider, apiKey)
 }

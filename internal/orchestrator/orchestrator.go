@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -121,6 +122,9 @@ func (o *Orchestrator) StartProcessing() {
 
 // handleMessage processs a single message
 func (o *Orchestrator) handleMessage(msg domain.Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	o.mu.Lock()
 	if thread, exists := o.activeThreads[msg.ThreadID]; exists {
 		thread.Messages = append(thread.Messages, msg)
@@ -156,7 +160,7 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 	}
 
 	recipient.SetStatus(domain.AgentBusy)
-	responses := recipient.ProcessMessage(msg)
+	responses := recipient.ProcessMessage(ctx, msg)
 
 	for _, response := range responses {
 		o.messageQueue <- response

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -72,7 +73,7 @@ Format your response as JSON with the following structure:
 }
 
 // ProcessMessage handles incoming messages for the treatment agent
-func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
+func (a *TreatmentAgent) ProcessMessage(ctx context.Context, msg domain.Message) []domain.Message {
 	if msg.MessageType != domain.DiagnosisResults {
 		return nil
 	}
@@ -115,7 +116,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 		},
 	))
 
-	treatmentPlan := a.createTreatmentPlan(patientData, diagnosis)
+	treatmentPlan := a.createTreatmentPlan(ctx, patientData, diagnosis)
 
 	a.treatmentPlans[taskID] = treatmentPlan
 	a.UpdateKnowledge("current_treatment_plan", treatmentPlan)
@@ -193,7 +194,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 }
 
 // createTreatmentPlan develops a personalized treatment plan using AI
-func (a *TreatmentAgent) createTreatmentPlan(patientData, diagnosis map[string]any) map[string]any {
+func (a *TreatmentAgent) createTreatmentPlan(ctx context.Context, patientData, diagnosis map[string]any) map[string]any {
 	age := getFloat64(patientData, "age")
 	gender := getString(patientData, "gender")
 	conditions := getStringSlice(patientData, "conditions")
@@ -228,7 +229,7 @@ func (a *TreatmentAgent) createTreatmentPlan(patientData, diagnosis map[string]a
 		prompt += "\n\n" + interactionInfo
 	}
 
-	aiResponse, err := a.aiClient.GenerateCompletion(prompt, ai.CompletionOptions{
+	aiResponse, err := a.aiClient.GenerateCompletion(ctx, prompt, ai.CompletionOptions{
 		MaxTokens:    1024,
 		Temperature:  0.3,
 		ModelName:    "gpt-4",

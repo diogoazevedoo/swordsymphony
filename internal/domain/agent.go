@@ -1,5 +1,9 @@
 package domain
 
+import (
+	"context"
+)
+
 // AgentStatus represents the current state of an agent
 type AgentStatus string
 
@@ -19,7 +23,7 @@ type Agent interface {
 	Name() string
 
 	// ProcessMessage handles an incoming message and returns any response messages
-	ProcessMessage(msg Message) []Message
+	ProcessMessage(ctx context.Context, msg Message) []Message
 
 	// Status returns the current status of the agent
 	Status() AgentStatus

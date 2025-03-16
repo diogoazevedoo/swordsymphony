@@ -18,7 +18,8 @@ type openAIClient struct {
 	retries    int
 }
 
-func newOpenAIClient(apiKey string) *openAIClient {
+// NewOpenAIClient creates a new OpenAI client
+func NewOpenAIClient(apiKey string) Client {
 	return &openAIClient{
 		apiKey: apiKey,
 		httpClient: &http.Client{
@@ -55,8 +56,8 @@ type openAIResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// GenerateCompletion implements the AI Client interface with retry logic and better error handling
-func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptions) (CompletionResponse, error) {
+// GenerateCompletion implements the AI Client interface
+func (c *openAIClient) GenerateCompletion(ctx context.Context, prompt string, options CompletionOptions) (CompletionResponse, error) {
 	model := "gpt-4"
 	if options.ModelName != "" {
 		model = options.ModelName
@@ -91,9 +92,6 @@ func (c *openAIClient) GenerateCompletion(prompt string, options CompletionOptio
 			backoffDuration := time.Duration(attempt*attempt) * 500 * time.Millisecond
 			time.Sleep(backoffDuration)
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
 
 		result, apiErr = c.doRequest(ctx, jsonData, model)
 		if apiErr == nil {
@@ -169,7 +167,7 @@ func isTransientError(err error) bool {
 }
 
 // GenerateEmbedding creates vector embeddings
-func (c *openAIClient) GenerateEmbedding(text string) ([]float64, error) {
-	// TODO
+func (c *openAIClient) GenerateEmbedding(ctx context.Context, text string) ([]float64, error) {
+	// TODO: Implement actual embedding logic
 	return make([]float64, 1536), nil
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
@@ -19,8 +20,7 @@ func NewIntakeAgent() *IntakeAgent {
 }
 
 // ProcessMessage handles incoming messages for the intake agent
-func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
-	// Only process task assignments
+func (a *IntakeAgent) ProcessMessage(ctx context.Context, msg domain.Message) []domain.Message {
 	if msg.MessageType != domain.TaskAssignment {
 		return nil
 	}
@@ -87,8 +87,6 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 
 // processPatientData normalizes and enhances patient data
 func (a *IntakeAgent) processPatientData(rawData map[string]any) map[string]any {
-	// TODO: a better implementation of this will be capable to normalize and validate data from various sources
-
 	processed := make(map[string]any)
 
 	for k, v := range rawData {
