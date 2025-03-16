@@ -16,6 +16,7 @@ type Orchestrator struct {
 	activeThreads map[uuid.UUID]*TaskThread
 	mu            sync.RWMutex
 	subscribers   map[chan domain.Message]bool
+	router        *MessageRouter
 }
 
 // TaskThread represents the conversation thread for a specific task
@@ -35,6 +36,7 @@ func NewOrchestrator() *Orchestrator {
 		messageQueue:  make(chan domain.Message, 100),
 		activeThreads: make(map[uuid.UUID]*TaskThread),
 		subscribers:   make(map[chan domain.Message]bool),
+		router:        NewMessageRouter(),
 	}
 }
 
@@ -133,16 +135,17 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 		return
 	}
 
-	if msg.Recipient == "orchestrator" {
+	targetAgentType := o.router.RouteMessage(msg)
+	if string(targetAgentType) == "" || string(targetAgentType) == string(domain.OrchestratorAgentType) {
 		return
 	}
 
 	o.mu.RLock()
-	recipient, exists := o.agents[msg.Recipient]
+	recipient, exists := o.agents[string(targetAgentType)]
 	o.mu.RUnlock()
 
 	if !exists {
-		log.Printf("Warning: No agent found for recipient %s", msg.Recipient)
+		log.Printf("Warning: No agent found for recipient %s", targetAgentType)
 		return
 	}
 
