@@ -21,12 +21,11 @@ type DiagnosticAgent struct {
 
 // NewDiagnosticAgent creates a new diagnostic agent with AI capabilities
 func NewDiagnosticAgent(
-	id, name string,
 	aiClient ai.Client,
 	kb *knowledge.MedicalKnowledgeBase,
 ) *DiagnosticAgent {
 	return &DiagnosticAgent{
-		BaseAgent:     NewBaseAgent(id, name),
+		BaseAgent:     NewBaseAgent(string(domain.DiagnosticAgentType), domain.GetAgentName(domain.DiagnosticAgentType)),
 		diagnoses:     make(map[string]any),
 		aiClient:      aiClient,
 		knowledgeBase: kb,
@@ -83,7 +82,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 		*domain.NewMessage(
 			a.ID(),
 			a.Name(),
-			"orchestrator",
+			string(domain.OrchestratorAgentType),
 			domain.StatusUpdate,
 			map[string]any{
 				"task_id":  taskID,
@@ -97,7 +96,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.StatusUpdate,
 		map[string]any{
 			"task_id":  taskID,
@@ -115,7 +114,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.StatusUpdate,
 		map[string]any{
 			"task_id":  taskID,
@@ -128,7 +127,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"treatment_agent",
+		string(domain.TreatmentAgentType),
 		domain.DiagnosisResults,
 		map[string]any{
 			"task_id":      taskID,
@@ -142,7 +141,7 @@ func (a *DiagnosticAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.TaskComplete,
 		map[string]any{
 			"task_id": taskID,

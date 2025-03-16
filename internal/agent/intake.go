@@ -12,9 +12,9 @@ type IntakeAgent struct {
 }
 
 // NewIntakeAgent creates a new intake agent
-func NewIntakeAgent(id, name string) *IntakeAgent {
+func NewIntakeAgent() *IntakeAgent {
 	return &IntakeAgent{
-		BaseAgent: NewBaseAgent(id, name),
+		BaseAgent: NewBaseAgent(string(domain.IntakeAgentType), domain.GetAgentName(domain.IntakeAgentType)),
 	}
 }
 
@@ -36,11 +36,10 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	a.UpdateKnowledge("current_patient", processedData)
 
 	responses := []domain.Message{
-		// Status update to orchestrator
 		*domain.NewMessage(
 			a.ID(),
 			a.Name(),
-			"orchestrator",
+			string(domain.OrchestratorAgentType),
 			domain.StatusUpdate,
 			map[string]any{
 				"task_id":  taskID,
@@ -50,11 +49,10 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 			},
 		),
 
-		// Send data to diagnostic agent
 		*domain.NewMessage(
 			a.ID(),
 			a.Name(),
-			"diagnostic_agent",
+			string(domain.DiagnosticAgentType),
 			domain.ProcessedData,
 			map[string]any{
 				"task_id":    taskID,
@@ -65,11 +63,10 @@ func (a *IntakeAgent) ProcessMessage(msg domain.Message) []domain.Message {
 			},
 		),
 
-		// Task completion notification
 		*domain.NewMessage(
 			a.ID(),
 			a.Name(),
-			"orchestrator",
+			string(domain.OrchestratorAgentType),
 			domain.TaskComplete,
 			map[string]any{
 				"task_id": taskID,

@@ -24,13 +24,12 @@ type TreatmentAgent struct {
 
 // NewTreatmentAgent creates a new treatment agent with AI capabilities
 func NewTreatmentAgent(
-	id, name string,
 	aiClient ai.Client,
 	kb *knowledge.MedicalKnowledgeBase,
 	resultRepo repository.ResultRepository,
 ) *TreatmentAgent {
 	return &TreatmentAgent{
-		BaseAgent:        NewBaseAgent(id, name),
+		BaseAgent:        NewBaseAgent(string(domain.TreatmentAgentType), domain.GetAgentName(domain.TreatmentAgentType)),
 		treatmentPlans:   make(map[string]any),
 		aiClient:         aiClient,
 		knowledgeBase:    kb,
@@ -92,7 +91,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 		*domain.NewMessage(
 			a.ID(),
 			a.Name(),
-			"orchestrator",
+			string(domain.OrchestratorAgentType),
 			domain.StatusUpdate,
 			map[string]any{
 				"task_id":  taskID,
@@ -106,7 +105,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.StatusUpdate,
 		map[string]any{
 			"task_id":  taskID,
@@ -147,7 +146,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.StatusUpdate,
 		map[string]any{
 			"task_id":  taskID,
@@ -160,7 +159,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.TreatmentPlan,
 		map[string]any{
 			"task_id":        taskID,
@@ -175,7 +174,7 @@ func (a *TreatmentAgent) ProcessMessage(msg domain.Message) []domain.Message {
 	responses = append(responses, *domain.NewMessage(
 		a.ID(),
 		a.Name(),
-		"orchestrator",
+		string(domain.OrchestratorAgentType),
 		domain.TaskComplete,
 		map[string]any{
 			"task_id": taskID,

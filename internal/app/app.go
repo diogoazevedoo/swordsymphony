@@ -112,9 +112,9 @@ func (a *Application) initRepositories() error {
 func (a *Application) initOrchestrator() error {
 	a.Orchestrator = orchestrator.NewOrchestrator()
 
-	intakeAgent := agent.NewIntakeAgent("intake_agent", "Patient Intake Agent")
-	diagnosticAgent := agent.NewDiagnosticAgent("diagnostic_agent", "Diagnostic Agent", a.AIClient, a.KnowledgeBase)
-	treatmentAgent := agent.NewTreatmentAgent("treatment_agent", "Treatment Agent", a.AIClient, a.KnowledgeBase, a.ResultRepo)
+	intakeAgent := agent.NewIntakeAgent()
+	diagnosticAgent := agent.NewDiagnosticAgent(a.AIClient, a.KnowledgeBase)
+	treatmentAgent := agent.NewTreatmentAgent(a.AIClient, a.KnowledgeBase, a.ResultRepo)
 
 	a.Orchestrator.RegisterAgent(intakeAgent)
 	a.Orchestrator.RegisterAgent(diagnosticAgent)
