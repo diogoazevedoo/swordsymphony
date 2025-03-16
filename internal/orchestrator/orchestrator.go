@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/google/uuid"
 )
 
@@ -46,7 +47,9 @@ func (o *Orchestrator) RegisterAgent(agent domain.Agent) {
 	defer o.mu.Unlock()
 
 	o.agents[agent.ID()] = agent
-	log.Printf("Agent registered %s (%s)", agent.Name(), agent.ID())
+	logger.Info("Agent registered",
+		"agent_id", agent.ID(),
+		"agent_name", agent.Name())
 }
 
 // TaskInfo represents the output of StartTask
@@ -107,7 +110,7 @@ func (o *Orchestrator) StartTask(taskDetails map[string]any) TaskInfo {
 
 // StartProcessing begins the message handling loop
 func (o *Orchestrator) StartProcessing() {
-	log.Println("Starting orchestration engine...")
+	logger.Info("Starting orchestration engine")
 
 	go func() {
 		for msg := range o.messageQueue {
@@ -145,7 +148,10 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 	o.mu.RUnlock()
 
 	if !exists {
-		log.Printf("Warning: No agent found for recipient %s", targetAgentType)
+		logger.Warn("No agent found for recipient",
+			"recipient", targetAgentType,
+			"message_type", msg.MessageType,
+			"thread_id", msg.ThreadID)
 		return
 	}
 
@@ -161,6 +167,11 @@ func (o *Orchestrator) handleMessage(msg domain.Message) {
 func (o *Orchestrator) handleTaskCompletion(msg domain.Message) {
 	taskID := msg.Content["task_id"]
 	agentID := msg.Sender
+
+	logger.Info("Task completion message received",
+		"task_id", taskID,
+		"agent_id", agentID,
+		"thread_id", msg.ThreadID)
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -195,6 +206,10 @@ func (o *Orchestrator) handleTaskCompletion(msg domain.Message) {
 	}
 
 	if allComplete {
+		logger.Info("All agents completed task",
+			"task_id", taskID,
+			"thread_id", thread.ThreadID)
+
 		thread.Status = "completed"
 
 		completionMsg := domain.NewMessage(

@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/gin-gonic/gin"
 )
 
@@ -60,7 +60,7 @@ func (s *Server) Router() *gin.Engine {
 
 // Start begins listening for HTTP requests
 func (s *Server) Start() error {
-	log.Printf("Server is running on %s", s.http.Addr)
+	logger.Info("Server is running", "address", s.http.Addr)
 	if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -70,7 +70,7 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown() error {
-	log.Println("Server is shutting down...")
+	logger.Info("Server is shutting down")
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/diogoazevedoo/swordsymphony/internal/app"
 	"github.com/diogoazevedoo/swordsymphony/internal/config"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/joho/godotenv"
 )
 
@@ -19,19 +20,22 @@ func init() {
 }
 
 func main() {
+	logger.Init(logger.LogLevel("info"))
+	logger.Info("Starting SwordSymphony API")
+
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		logger.Fatal("Failed to load configuration: %v", "error", err)
 	}
 
 	application, err := app.NewApplication(cfg)
 	if err != nil {
-		log.Fatalf("Failed to initialize application: %v", err)
+		logger.Fatal("Failed to initialize application: %v", "error", err)
 	}
 
 	go func() {
 		if err := application.Start(); err != nil {
-			log.Fatalf("Failed to start application: %v", err)
+			logger.Fatal("Failed to start application: %v", "error", err)
 		}
 	}()
 
@@ -39,8 +43,11 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down gracefully...")
+	logger.Info("Shutting down gracefully...")
 	if err := application.Stop(); err != nil {
-		log.Fatalf("Error during shutdown: %v", err)
+		logger.Fatal("Error during shutdown: %v", "error", err)
+		os.Exit(1)
 	}
+
+	logger.Info("Application stopped successfully")
 }

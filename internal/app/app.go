@@ -8,6 +8,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
 	"github.com/diogoazevedoo/swordsymphony/internal/config"
 	"github.com/diogoazevedoo/swordsymphony/internal/knowledge"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/diogoazevedoo/swordsymphony/internal/orchestrator"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
@@ -66,10 +67,12 @@ func (a *Application) initDatabase() error {
 	var err error
 	a.DB, err = postgres.NewDB(a.Config.Database)
 	if err != nil {
+		logger.Warn("Failed to connect to database, using in-memory storage",
+			"error", err)
 		return err
 	}
 
-	log.Println("Successfully connected to database")
+	logger.Info("Successfully connected to database")
 	return nil
 }
 
@@ -93,12 +96,12 @@ func (a *Application) initRepositories() error {
 		a.CaseRepo = postgres.NewCaseRepository(a.DB)
 		a.ResultRepo = postgres.NewResultRepository(a.DB)
 
-		log.Println("Using PostgreSQL repositories")
+		logger.Info("Using PostgreSQL repositories")
 	} else {
 		a.CaseRepo = memory.NewCaseRepository()
 		a.ResultRepo = memory.NewResultRepository()
 
-		log.Println("Using in-memory repositories")
+		logger.Info("Using in-memory repositories")
 	}
 
 	if err := a.CaseRepo.InitializeDemoCases(); err != nil {
@@ -144,22 +147,22 @@ func (a *Application) Start() error {
 
 // Stop gracefully shuts down the application
 func (a *Application) Stop() error {
-	log.Println("Stopping application...")
+	logger.Info("Stopping application")
 
 	if a.DB != nil {
-		log.Println("Closing database connection...")
+		logger.Info("Closing database connection")
 		if err := a.DB.Close(); err != nil {
-			log.Printf("Error closing database connection: %v", err)
+			logger.Error("Error closing database connection", "error", err)
 		}
 	}
 
 	if a.Server != nil {
-		log.Println("Shutting down server...")
+		logger.Info("Shutting down server")
 		if err := a.Server.Shutdown(); err != nil {
-			log.Printf("Error shutting down server: %v", err)
+			logger.Error("Error shutting down server", "error", err)
 		}
 	}
 
-	log.Println("Application stopped")
+	logger.Info("Application stopped")
 	return nil
 }
