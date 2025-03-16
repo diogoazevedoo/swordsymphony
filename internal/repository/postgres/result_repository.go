@@ -1,10 +1,8 @@
 package postgres
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
-	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 )
@@ -31,7 +29,7 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		return errors.Validation("Results cannot be nil", "nil_results")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
 	resultsJSON, err := json.Marshal(results)
@@ -77,7 +75,7 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 		return nil, errors.Validation("Case ID cannot be empty", "empty_case_id")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
 	query := `

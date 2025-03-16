@@ -1,11 +1,9 @@
 package postgres
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"sync"
-	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 )
@@ -26,7 +24,7 @@ func NewCaseRepository(db *DB) *CaseRepository {
 
 // GetDemoCases returns all available demo cases
 func (r *CaseRepository) GetDemoCases() (map[string]map[string]any, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
 	query := `
@@ -75,7 +73,7 @@ func (r *CaseRepository) GetCaseByID(id string) (map[string]any, error) {
 		return nil, errors.Validation("Case ID cannot be empty", "empty_case_id")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
 	query := `
@@ -126,18 +124,16 @@ func (r *CaseRepository) ClearCurrentCase() {
 func (r *CaseRepository) InitializeDemoCases() error {
 	cases, err := r.GetDemoCases()
 	if err != nil {
-		// Only proceed if the error is "no demo cases"
 		if appErr, ok := err.(*errors.AppError); !ok || appErr.Type != errors.ErrorTypeNotFound {
 			return errors.Wrap(err, errors.ErrorTypeInternal, "Failed to check for existing demo cases", "demo_case_check_error")
 		}
 	}
 
-	// If cases exist, we're done
 	if len(cases) > 0 {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := withTimeout(defaultTxTimeout)
 	defer cancel()
 
 	tx, err := r.db.BeginTx(ctx, nil)

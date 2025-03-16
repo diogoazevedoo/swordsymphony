@@ -27,7 +27,10 @@ func NewDB(cfg config.DatabaseConfig) (*DB, error) {
 		return nil, errors.External(err, "Failed to connect to database", "db_connection_error")
 	}
 
-	if err := db.Ping(); err != nil {
+	ctx, cancel := withTimeout(defaultQueryTimeout)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
 		return nil, errors.External(err, "Failed to ping database", "db_ping_error")
 	}
 
