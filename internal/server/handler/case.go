@@ -11,7 +11,7 @@ import (
 func (h *Handler) GetDemoCases(c *gin.Context) {
 	cases, err := h.caseRepository.GetDemoCases()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		handleError(c, err)
 		return
 	}
 
@@ -24,7 +24,7 @@ func (h *Handler) StartCase(c *gin.Context) {
 
 	caseData, err := h.caseRepository.GetCaseByID(caseID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Case not found"})
+		handleError(c, err)
 		return
 	}
 
@@ -101,7 +101,7 @@ func (h *Handler) GetResults(c *gin.Context) {
 
 	results, err := h.resultRepository.GetResultsByCaseID(caseID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No results found for this case"})
+		handleError(c, err)
 		return
 	}
 
