@@ -7,6 +7,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
+	"github.com/diogoazevedoo/swordsymphony/internal/workflow"
 	"github.com/gin-gonic/gin"
 )
 
@@ -16,6 +17,7 @@ type ActorHandler struct {
 	orchestratorAddr actor.Address
 	caseRepository   repository.CaseRepository
 	resultRepository repository.ResultRepository
+	workflowEngine   *workflow.WorkflowEngine
 }
 
 // NewActorHandler creates a new handler instance using actor system
@@ -24,12 +26,14 @@ func NewActorHandler(
 	orchestratorAddr actor.Address,
 	caseRepo repository.CaseRepository,
 	resultRepo repository.ResultRepository,
+	workflowEngine *workflow.WorkflowEngine,
 ) *ActorHandler {
 	return &ActorHandler{
 		actorSystem:      actorSystem,
 		orchestratorAddr: orchestratorAddr,
 		caseRepository:   caseRepo,
 		resultRepository: resultRepo,
+		workflowEngine:   workflowEngine,
 	}
 }
 
@@ -85,4 +89,11 @@ func (h *ActorHandler) GetAgentDetails(c *gin.Context) {
 		"type":   "agent",
 		"status": "active",
 	})
+}
+
+func (h *ActorHandler) getWorkflowEngine() (*workflow.WorkflowEngine, error) {
+	if h.workflowEngine == nil {
+		return nil, errors.Internal("Workflow engine not available", "workflow_not_available")
+	}
+	return h.workflowEngine, nil
 }

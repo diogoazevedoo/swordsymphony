@@ -1,0 +1,49 @@
+id: "standard_diagnostic_workflow"
+name: "Standard Diagnostic and Treatment"
+description: "Default workflow for diagnosis and treatment planning"
+version: "1.0.0"
+
+steps:
+  - id: "intake"
+    name: "Patient Intake"
+    type: "task"
+    agent_type: "intake_agent"
+    
+  - id: "diagnosis"
+    name: "Medical Diagnosis"
+    type: "task"
+    agent_type: "diagnostic_agent"
+    
+  - id: "treatment"
+    name: "Treatment Planning"
+    type: "task"
+    agent_type: "treatment_agent"
+
+connections:
+  - from: "intake"
+    to: "diagnosis"
+  
+  - from: "diagnosis"
+    to: "treatment"
+
+input_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "patient_data": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "age": {"type": "number"},
+          "gender": {"type": "string"},
+          "symptoms": {"type": "array", "items": {"type": "string"}},
+          "conditions": {"type": "array", "items": {"type": "string"}},
+          "medications": {"type": "array", "items": {"type": "string"}},
+          "vitals": {"type": "object"}
+        },
+        "required": ["id", "name", "age", "gender", "symptoms"]
+      }
+    },
+    "required": ["patient_data"]
+  }

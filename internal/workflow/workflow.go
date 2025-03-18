@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
+	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
@@ -176,16 +178,539 @@ func (e *WorkflowEngine) GetWorkflowInstance(instanceID uuid.UUID) (*WorkflowIns
 	return instance, nil
 }
 
-// executeWorkflow runs a workflow instance
+// executeWorkflow runs the workflow instance
 func (e *WorkflowEngine) executeWorkflow(ctx context.Context, instance *WorkflowInstance) {
-	// TODO: Implement workflow execution logic
+	logger.Info("Workflow execution started",
+		"instance_id", instance.ID,
+		"workflow_id", instance.WorkflowID)
 
-	logger.Info("Workflow execution started", "instance_id", instance.ID, "workflow_id", instance.WorkflowID)
+	e.mu.RLock()
+	workflowDef, exists := e.definitions[instance.WorkflowID]
+	e.mu.RUnlock()
+
+	if !exists {
+		logger.Error("Workflow definition not found",
+			"workflow_id", instance.WorkflowID)
+		e.completeWorkflow(instance, "failed", "Workflow definition not found")
+		return
+	}
+
+	state := NewWorkflowState(instance, workflowDef)
+
+	startingSteps := state.FindStartingSteps()
+	if len(startingSteps) == 0 {
+		logger.Error("No starting steps found in workflow",
+			"workflow_id", instance.WorkflowID)
+		e.completeWorkflow(instance, "failed", "No starting steps found in workflow")
+		return
+	}
+
+	for _, step := range startingSteps {
+		state.QueueStep(step.ID)
+	}
+
+	workflowCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	for !state.IsComplete() {
+		select {
+		case <-workflowCtx.Done():
+			logger.Warn("Workflow execution cancelled",
+				"instance_id", instance.ID,
+				"reason", workflowCtx.Err())
+			e.completeWorkflow(instance, "cancelled", "Workflow execution cancelled")
+			return
+		default:
+			stepID, ok := state.NextStep()
+			if !ok {
+				if state.WaitingCount() > 0 {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				break
+			}
+
+			step := state.GetStep(stepID)
+			if step == nil {
+				logger.Error("Step not found in workflow",
+					"step_id", stepID,
+					"workflow_id", instance.WorkflowID)
+				continue
+			}
+
+			if !state.EvaluateCondition(step) {
+				logger.Info("Step condition not met, skipping",
+					"step_id", stepID,
+					"condition", step.Condition)
+				state.MarkStepComplete(stepID, "skipped", nil)
+				state.QueueDependentSteps(stepID)
+				continue
+			}
+
+			if step.Parallel {
+				wg.Add(1)
+				go func(s *WorkflowStep) {
+					defer wg.Done()
+					e.executeStep(workflowCtx, state, s)
+				}(step)
+			} else {
+				e.executeStep(workflowCtx, state, step)
+			}
+		}
+	}
+
+	wg.Wait()
+
+	finalStatus := "completed"
+	if state.HasFailedSteps() {
+		finalStatus = "failed"
+	}
+
+	outputs := state.CollectOutputs()
+
+	e.completeWorkflow(instance, finalStatus, "")
 
 	e.mu.Lock()
-	instance.Status = "completed"
-	instance.EndTime = time.Now().UnixNano()
+	instance.Output = outputs
 	e.mu.Unlock()
 
-	logger.Info("Workflow execution completed", "instance_id", instance.ID, "workflow_id", instance.WorkflowID)
+	logger.Info("Workflow execution completed",
+		"instance_id", instance.ID,
+		"workflow_id", instance.WorkflowID,
+		"status", finalStatus)
+}
+
+// completeWorkflow updates the status of a workflow instance
+func (e *WorkflowEngine) completeWorkflow(instance *WorkflowInstance, status string, errorMsg string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	instance.Status = status
+	instance.EndTime = time.Now().UnixNano()
+
+	if errorMsg != "" && !contains(instance.Errors, errorMsg) {
+		instance.Errors = append(instance.Errors, errorMsg)
+	}
+}
+
+// Helper function to check if a string slice contains a value
+func contains(slice []string, value string) bool {
+	for _, item := range slice {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+// WorkflowState manages the state of a workflow during execution
+type WorkflowState struct {
+	instance       *WorkflowInstance
+	definition     WorkflowDefinition
+	stepMap        map[string]*WorkflowStep
+	stepStatus     map[string]string // "queued", "in_progress", "completed", "failed", "skipped"
+	stepResults    map[string]map[string]any
+	waitingSteps   map[string]bool
+	stepQueue      []string
+	stepDependents map[string][]string
+	mutex          sync.RWMutex
+}
+
+// NewWorkflowState creates a new workflow state
+func NewWorkflowState(instance *WorkflowInstance, definition WorkflowDefinition) *WorkflowState {
+	stepMap := make(map[string]*WorkflowStep)
+	for i := range definition.Steps {
+		step := &definition.Steps[i]
+		stepMap[step.ID] = step
+	}
+
+	stepDependents := make(map[string][]string)
+	for _, conn := range definition.Connections {
+		if _, exists := stepDependents[conn.From]; !exists {
+			stepDependents[conn.From] = make([]string, 0)
+		}
+		stepDependents[conn.From] = append(stepDependents[conn.From], conn.To)
+	}
+
+	return &WorkflowState{
+		instance:       instance,
+		definition:     definition,
+		stepMap:        stepMap,
+		stepStatus:     make(map[string]string),
+		stepResults:    make(map[string]map[string]any),
+		waitingSteps:   make(map[string]bool),
+		stepQueue:      make([]string, 0),
+		stepDependents: stepDependents,
+	}
+}
+
+// FindStartingSteps identifies the first steps in the workflow (with no incoming connections)
+func (s *WorkflowState) FindStartingSteps() []*WorkflowStep {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	hasIncoming := make(map[string]bool)
+	for _, conn := range s.definition.Connections {
+		hasIncoming[conn.To] = true
+	}
+
+	startingSteps := make([]*WorkflowStep, 0)
+	for _, step := range s.definition.Steps {
+		if !hasIncoming[step.ID] {
+			if ss, exists := s.stepMap[step.ID]; exists {
+				startingSteps = append(startingSteps, ss)
+			}
+		}
+	}
+
+	return startingSteps
+}
+
+// QueueStep adds a step to the execution queue
+func (s *WorkflowState) QueueStep(stepID string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if _, exists := s.stepStatus[stepID]; !exists {
+		s.stepQueue = append(s.stepQueue, stepID)
+		s.stepStatus[stepID] = "queued"
+	}
+}
+
+// NextStep gets the next step from the queue
+func (s *WorkflowState) NextStep() (string, bool) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if len(s.stepQueue) == 0 {
+		return "", false
+	}
+
+	stepID := s.stepQueue[0]
+	s.stepQueue = s.stepQueue[1:]
+	s.stepStatus[stepID] = "in_progress"
+	s.waitingSteps[stepID] = true
+
+	return stepID, true
+}
+
+// GetStep retrieves a step by ID
+func (s *WorkflowState) GetStep(stepID string) *WorkflowStep {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	return s.stepMap[stepID]
+}
+
+// MarkStepComplete marks a step as complete and records its results
+func (s *WorkflowState) MarkStepComplete(stepID string, status string, results map[string]any) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.stepStatus[stepID] = status
+	if results != nil {
+		s.stepResults[stepID] = results
+	}
+	delete(s.waitingSteps, stepID)
+
+	if status == "completed" || status == "skipped" {
+		s.instance.CompletedSteps = append(s.instance.CompletedSteps, stepID)
+	}
+}
+
+// QueueDependentSteps queues steps that depend on a completed step
+func (s *WorkflowState) QueueDependentSteps(stepID string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	dependents, exists := s.stepDependents[stepID]
+	if !exists {
+		return
+	}
+
+	for _, dependent := range dependents {
+		if _, exists := s.stepStatus[dependent]; exists {
+			continue
+		}
+
+		allDepsComplete := true
+		for _, conn := range s.definition.Connections {
+			if conn.To == dependent {
+				fromStatus, exists := s.stepStatus[conn.From]
+				if !exists || (fromStatus != "completed" && fromStatus != "skipped") {
+					allDepsComplete = false
+					break
+				}
+			}
+		}
+
+		if allDepsComplete {
+			s.stepQueue = append(s.stepQueue, dependent)
+			s.stepStatus[dependent] = "queued"
+		}
+	}
+}
+
+// WaitingCount returns the number of steps currently in progress
+func (s *WorkflowState) WaitingCount() int {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	return len(s.waitingSteps)
+}
+
+// IsComplete checks if workflow execution is complete
+func (s *WorkflowState) IsComplete() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	return len(s.stepQueue) == 0 && len(s.waitingSteps) == 0
+}
+
+// HasFailedSteps checks if any steps have failed
+func (s *WorkflowState) HasFailedSteps() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	for _, status := range s.stepStatus {
+		if status == "failed" {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateCondition checks if a step's condition is met
+func (s *WorkflowState) EvaluateCondition(step *WorkflowStep) bool {
+	if step.Condition == "" {
+		return true
+	}
+
+	for _, results := range s.stepResults {
+		for _, value := range results {
+			if strValue, ok := value.(string); ok && strings.Contains(strValue, step.Condition) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// CollectOutputs gathers all step results
+func (s *WorkflowState) CollectOutputs() map[string]any {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	outputs := make(map[string]any)
+
+	for stepID, results := range s.stepResults {
+		stepKey := fmt.Sprintf("step.%s", stepID)
+		outputs[stepKey] = results
+	}
+
+	return outputs
+}
+
+// executeStep runs a single step in the workflow
+func (e *WorkflowEngine) executeStep(ctx context.Context, state *WorkflowState, step *WorkflowStep) {
+	logger.Info("Executing workflow step",
+		"step_id", step.ID,
+		"step_name", step.Name,
+		"agent_type", step.AgentType)
+
+	var stepCtx context.Context
+	var cancel context.CancelFunc
+
+	if step.TimeoutSecs > 0 {
+		stepCtx, cancel = context.WithTimeout(ctx, time.Duration(step.TimeoutSecs)*time.Second)
+	} else {
+		stepCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	var results map[string]any
+	var err error
+
+	switch step.Type {
+	case "task":
+		results, err = e.executeTaskStep(stepCtx, state, step)
+	case "condition":
+		results, err = e.executeConditionStep(stepCtx, state, step)
+	case "transformation":
+		results, err = e.executeTransformationStep(stepCtx, state, step)
+	default:
+		err = fmt.Errorf("unknown step type: %s", step.Type)
+	}
+
+	if err != nil {
+		logger.Error("Step execution failed",
+			"step_id", step.ID,
+			"error", err)
+
+		if state.GetStepRetryCount(step.ID) < step.MaxRetries {
+			logger.Info("Retrying step",
+				"step_id", step.ID,
+				"retry_count", state.GetStepRetryCount(step.ID)+1,
+				"max_retries", step.MaxRetries)
+
+			state.IncrementStepRetryCount(step.ID)
+			state.QueueStep(step.ID)
+			state.MarkStepComplete(step.ID, "in_progress", nil)
+			return
+		}
+
+		state.MarkStepComplete(step.ID, "failed", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	state.MarkStepComplete(step.ID, "completed", results)
+	state.QueueDependentSteps(step.ID)
+}
+
+// GetStepRetryCount retrieves the retry count for a step
+func (s *WorkflowState) GetStepRetryCount(stepID string) int {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	key := fmt.Sprintf("retry_%s", stepID)
+	if value, exists := s.instance.StepResults[key]; exists {
+		if count, ok := value.(int); ok {
+			return count
+		}
+	}
+	return 0
+}
+
+// IncrementStepRetryCount increments the retry count for a step
+func (s *WorkflowState) IncrementStepRetryCount(stepID string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	count := 0
+	key := fmt.Sprintf("retry_%s", stepID)
+	if value, exists := s.instance.StepResults[key]; exists {
+		if existingCount, ok := value.(int); ok {
+			count = existingCount
+		}
+	}
+
+	count++
+	if s.instance.StepResults == nil {
+		s.instance.StepResults = make(map[string]any)
+	}
+	s.instance.StepResults[key] = count
+}
+
+// executeTaskStep runs a task step in the workflow
+func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowState, step *WorkflowStep) (map[string]any, error) {
+	if e.orchestratorRef == nil {
+		return nil, fmt.Errorf("orchestrator not set")
+	}
+
+	orchestrator, ok := e.orchestratorRef.(*orchestratorActor.OrchestratorActor)
+	if !ok {
+		return nil, fmt.Errorf("orchestrator reference is not valid")
+	}
+
+	inputData := make(map[string]any)
+	for k, v := range state.instance.Input {
+		inputData[k] = v
+	}
+
+	for stepID, results := range state.stepResults {
+		stepKey := fmt.Sprintf("step.%s", stepID)
+		inputData[stepKey] = results
+	}
+
+	if step.Config != nil {
+		for k, v := range step.Config {
+			configKey := fmt.Sprintf("config.%s", k)
+			inputData[configKey] = v
+		}
+	}
+
+	inputWithStepInfo := map[string]any{
+		"patient_data":     inputData,
+		"workflow_step_id": step.ID,
+		"agent_type":       step.AgentType,
+	}
+
+	taskInfo := orchestrator.StartTask(inputWithStepInfo)
+
+	state.mutex.Lock()
+	if state.instance.TaskID == uuid.Nil {
+		state.instance.TaskID = taskInfo.TaskID
+	}
+	if state.instance.ThreadID == uuid.Nil {
+		state.instance.ThreadID = taskInfo.ThreadID
+	}
+	state.mutex.Unlock()
+
+	taskResult := map[string]any{
+		"task_id":    taskInfo.TaskID.String(),
+		"thread_id":  taskInfo.ThreadID.String(),
+		"status":     "completed",
+		"step_id":    step.ID,
+		"agent_type": step.AgentType,
+	}
+
+	return taskResult, nil
+}
+
+// executeConditionStep runs a condition step in the workflow
+func (e *WorkflowEngine) executeConditionStep(ctx context.Context, state *WorkflowState, step *WorkflowStep) (map[string]any, error) {
+	result := state.EvaluateCondition(step)
+
+	return map[string]any{
+		"condition_result": result,
+		"step_id":          step.ID,
+	}, nil
+}
+
+// executeTransformationStep runs a transformation step in the workflow
+func (e *WorkflowEngine) executeTransformationStep(ctx context.Context, state *WorkflowState, step *WorkflowStep) (map[string]any, error) {
+	return map[string]any{
+		"transformed": true,
+		"step_id":     step.ID,
+	}, nil
+}
+
+// LoadWorkflowDefinitions loads all workflow definitions from a directory
+func LoadWorkflowDefinitions(dirPath string) ([]WorkflowDefinition, error) {
+	definitions := make([]WorkflowDefinition, 0)
+
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		return definitions, fmt.Errorf("failed to read workflow directory: %w", err)
+	}
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		filename := file.Name()
+		ext := filepath.Ext(filename)
+		if ext != ".json" && ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		filePath := filepath.Join(dirPath, filename)
+		definition, err := LoadWorkflowDefinition(filePath)
+		if err != nil {
+			logger.Warn("Failed to load workflow definition",
+				"file", filePath,
+				"error", err)
+			continue
+		}
+
+		definitions = append(definitions, definition)
+	}
+
+	return definitions, nil
 }

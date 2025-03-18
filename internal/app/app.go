@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/actor"
@@ -111,18 +112,29 @@ func (a *Application) initActorSystem() error {
 
 // loadWorkflowDefinitions loads workflow definitions from a directory
 func loadWorkflowDefinitions(dirPath string) ([]workflow.WorkflowDefinition, error) {
-	var definitions []workflow.WorkflowDefinition
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("workflow directory does not exist: %s", dirPath)
+	}
 
-	// TODO: Implement loading workflow definitions from files
-
-	return definitions, nil
+	return workflow.LoadWorkflowDefinitions(dirPath)
 }
 
 // Initialize HTTP server
 func (a *Application) initServer() error {
 	orchestratorAddr := actor.Address(domain.OrchestratorAgentType)
 
-	h := handler.NewActorHandler(a.actorSystem, orchestratorAddr, a.container.CaseRepo, a.container.ResultRepo)
+	h := handler.NewActorHandler(
+		a.actorSystem,
+		orchestratorAddr,
+		a.container.CaseRepo,
+		a.container.ResultRepo,
+		a.workflowEngine,
+	)
+
+	orchestrator, exists := a.actorSystem.GetActor(orchestratorAddr)
+	if exists {
+		a.workflowEngine.SetOrchestrator(orchestrator)
+	}
 
 	address := fmt.Sprintf(":%s", a.container.Config.Server.Port)
 	a.server = server.NewServer(address)

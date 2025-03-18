@@ -60,6 +60,12 @@ func (h *ActorHandler) StartWorkflow(c *gin.Context) {
 	workflowID := c.Param("workflow_id")
 	caseID := c.Param("case_id")
 
+	workflowEngine, err := h.getWorkflowEngine()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
 	caseData, err := h.caseRepository.GetCaseByID(caseID)
 	if err != nil {
 		handleError(c, err)
@@ -72,26 +78,22 @@ func (h *ActorHandler) StartWorkflow(c *gin.Context) {
 
 	logger.Info("Starting workflow", "workflow_id", workflowID, "case_id", caseID)
 
-	orchestrator, err := h.getOrchestrator()
+	instance, err := workflowEngine.StartWorkflow(c.Request.Context(), workflowID, map[string]interface{}{
+		"patient_data": caseData,
+	})
+
 	if err != nil {
 		handleError(c, err)
 		return
 	}
-
-	task := orchestrator.StartTask(map[string]interface{}{
-		"patient_data": caseData,
-		"scenario":     caseID,
-		"workflow_id":  workflowID,
-	})
 
 	h.caseRepository.SetCurrentCase(caseData)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":       "started",
 		"workflow_id":  workflowID,
+		"instance_id":  instance.ID,
 		"case_id":      caseID,
-		"task_id":      task.TaskID,
-		"thread_id":    task.ThreadID,
 		"patient_name": caseData["name"],
 	})
 }
