@@ -34,15 +34,15 @@ func NewDiagnosticActor(ctx context.Context, config actor.ActorConfig, system ac
 		aiClient:      aiClient,
 		knowledgeBase: kb,
 		diagnosticTemplate: `
-You are an experienced medical diagnostician. 
-Given the following patient information, provide a diagnostic assessment:
+You are an expert medical diagnostician with years of clinical experience. 
+Based on the patient information provided, generate a detailed diagnostic assessment.
 
 PATIENT INFORMATION:
 Age: {{.Age}}
 Gender: {{.Gender}}
-Medical Conditions: {{.Conditions}}
+Medical History: {{.Conditions}}
 Current Medications: {{.Medications}}
-Allergies: {{.Allergies}}
+Known Allergies: {{.Allergies}}
 
 PRESENTING SYMPTOMS:
 {{.Symptoms}}
@@ -50,21 +50,27 @@ PRESENTING SYMPTOMS:
 VITAL SIGNS:
 {{.Vitals}}
 
-Please provide:
-1. Most likely diagnoses in order of probability
-2. Clinical reasoning for each diagnosis
-3. Key risk factors present
-4. Recommended diagnostic tests
-5. Confidence level for your top diagnosis (0-100%)
+ASSESSMENT INSTRUCTIONS:
+1. Consider the most likely diagnoses based on the symptoms, vital signs, and patient history
+2. For each potential diagnosis, provide medical reasoning explaining why it's a possibility
+3. Note any relevant risk factors present in the patient profile
+4. Suggest appropriate diagnostic tests to confirm or rule out each diagnosis
+5. Assign a confidence level (0-100%) for your primary diagnosis based on available information
 
-Format your response as JSON with the following structure:
+FORMAT YOUR RESPONSE AS JSON:
 {
-  "potential_diagnoses": ["Diagnosis 1", "Diagnosis 2"],
-  "reasoning": ["Reason 1", "Reason 2"],
-  "risk_factors": ["Risk Factor 1", "Risk Factor 2"],
-  "recommended_tests": ["Test 1", "Test 2"],
+  "potential_diagnoses": ["Primary diagnosis", "Secondary diagnosis", "Tertiary diagnosis"],
+  "reasoning": ["Clinical reasoning for primary diagnosis", "Reasoning for secondary", "Reasoning for tertiary"],
+  "risk_factors": ["Specific risk factor 1", "Specific risk factor 2"],
+  "recommended_tests": ["Specific test 1", "Specific test 2", "Specific test 3"],
   "confidence": 85
-}`,
+}
+
+DIAGNOSTIC CONSIDERATIONS:
+- Consider both common and uncommon causes of the presenting symptoms
+- Pay special attention to any red flag symptoms that could indicate serious conditions
+- Consider how medications and existing conditions might affect the presentation
+- Think about age and gender-specific conditions that match the symptom profile`,
 	}, nil
 }
 
@@ -252,10 +258,11 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 		MaxTokens:    1024,
 		Temperature:  0.3,
 		ModelName:    "gpt-4",
-		SystemPrompt: "You are an AI medical assistant with expertise in diagnostics.",
+		SystemPrompt: "You are an expert medical diagnostician with comprehensive knowledge of medical conditions, symptoms, and diagnostic procedures.",
 	})
 
 	if err != nil {
+		logger.Error("AI diagnostic generation failed", "error", err)
 		return map[string]any{
 			"potential_diagnoses": []string{"Error in diagnostic process"},
 			"reasoning":           []string{"Unable to complete diagnosis due to AI service error: " + err.Error()},
@@ -265,7 +272,14 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 	}
 
 	var aiDiagnosis map[string]any
-	if err := json.Unmarshal([]byte(aiResponse.Text), &aiDiagnosis); err != nil {
+
+	diagnosisText := extractJSON(aiResponse.Text)
+
+	if err := json.Unmarshal([]byte(diagnosisText), &aiDiagnosis); err != nil {
+		logger.Error("Failed to parse AI diagnostic response",
+			"error", err,
+			"response", aiResponse.Text)
+
 		return map[string]any{
 			"potential_diagnoses": []string{"Diagnostic information available but not properly formatted"},
 			"reasoning":           []string{"AI diagnostic information: " + aiResponse.Text},
@@ -273,6 +287,8 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 			"confidence":          0.5,
 		}
 	}
+
+	validateAndNormalizeDiagnosticResponse(aiDiagnosis)
 
 	if len(relatedConditions) > 0 && aiDiagnosis["reasoning"] != nil {
 		reasoning, ok := aiDiagnosis["reasoning"].([]any)
@@ -401,4 +417,50 @@ func getMap(data map[string]any, key string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func extractJSON(text string) string {
+	jsonStart := strings.Index(text, "{")
+	jsonEnd := strings.LastIndex(text, "}")
+
+	if jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart {
+		return text
+	}
+
+	return text[jsonStart : jsonEnd+1]
+}
+
+func validateAndNormalizeDiagnosticResponse(diagnosis map[string]any) {
+	if _, exists := diagnosis["potential_diagnoses"]; !exists {
+		diagnosis["potential_diagnoses"] = []string{"Unspecified diagnosis"}
+	} else if _, ok := diagnosis["potential_diagnoses"].([]any); !ok {
+		diagnosis["potential_diagnoses"] = []string{"Unspecified diagnosis"}
+	}
+
+	if _, exists := diagnosis["reasoning"]; !exists {
+		diagnosis["reasoning"] = []string{"No reasoning provided"}
+	} else if _, ok := diagnosis["reasoning"].([]any); !ok {
+		diagnosis["reasoning"] = []string{"No reasoning provided"}
+	}
+
+	if _, exists := diagnosis["recommended_tests"]; !exists {
+		diagnosis["recommended_tests"] = []string{"No tests recommended"}
+	} else if _, ok := diagnosis["recommended_tests"].([]any); !ok {
+		diagnosis["recommended_tests"] = []string{"No tests recommended"}
+	}
+
+	if confidence, exists := diagnosis["confidence"]; !exists {
+		diagnosis["confidence"] = 0.5
+	} else {
+		switch v := confidence.(type) {
+		case float64:
+			if v > 1.0 {
+				diagnosis["confidence"] = v / 100.0
+			}
+		case int:
+			diagnosis["confidence"] = float64(v) / 100.0
+		default:
+			diagnosis["confidence"] = 0.5
+		}
+	}
 }

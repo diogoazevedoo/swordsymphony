@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 )
 
 type openAIClient struct {
@@ -84,26 +87,7 @@ func (c *openAIClient) GenerateCompletion(ctx context.Context, prompt string, op
 		return CompletionResponse{}, errors.Internal(fmt.Sprintf("failed to marshal request: %v", err), "ai_request_error")
 	}
 
-	var result CompletionResponse
-	var apiErr error
-
-	for attempt := 0; attempt <= c.retries; attempt++ {
-		if attempt > 0 {
-			backoffDuration := time.Duration(attempt*attempt) * 500 * time.Millisecond
-			time.Sleep(backoffDuration)
-		}
-
-		result, apiErr = c.doRequest(ctx, jsonData, model)
-		if apiErr == nil {
-			return result, nil
-		}
-
-		if !isTransientError(apiErr) {
-			break
-		}
-	}
-
-	return CompletionResponse{}, apiErr
+	return c.retryWithBackoff(ctx, jsonData, model)
 }
 
 func (c *openAIClient) doRequest(ctx context.Context, jsonData []byte, model string) (CompletionResponse, error) {
@@ -161,7 +145,15 @@ func (c *openAIClient) doRequest(ctx context.Context, jsonData []byte, model str
 // isTransientError determines if an error is likely temporary and should be retried
 func isTransientError(err error) bool {
 	if appErr, ok := err.(*errors.AppError); ok {
-		return appErr.Type == errors.ErrorTypeExternal
+		if appErr.Type == errors.ErrorTypeExternal {
+			if appErr.Code == "rate_limit_exceeded" ||
+				appErr.Code == "server_error" ||
+				appErr.Code == "service_unavailable" ||
+				strings.Contains(appErr.Message, "timeout") ||
+				strings.Contains(appErr.Message, "connection") {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -216,4 +208,46 @@ func (c *openAIClient) GenerateEmbedding(ctx context.Context, text string) ([]fl
 	}
 
 	return result.Data[0].Embedding, nil
+}
+
+// retryWithBackoff retries a request with exponential backoff
+func (c *openAIClient) retryWithBackoff(ctx context.Context, jsonData []byte, model string) (CompletionResponse, error) {
+	var result CompletionResponse
+	var lastErr error
+
+	for attempt := 0; attempt <= c.retries; attempt++ {
+		if attempt > 0 {
+			backoffDuration := time.Duration(attempt*attempt) * 500 * time.Millisecond
+			jitter := time.Duration(rand.Intn(100)) * time.Millisecond
+			backoffWithJitter := backoffDuration + jitter
+
+			logger.Info("Retrying OpenAI API request",
+				"attempt", attempt,
+				"max_retries", c.retries,
+				"backoff", backoffWithJitter.String())
+
+			select {
+			case <-time.After(backoffWithJitter):
+				// Continue with retry
+			case <-ctx.Done():
+				return CompletionResponse{}, fmt.Errorf("context cancelled during backoff: %w", ctx.Err())
+			}
+		}
+
+		result, lastErr = c.doRequest(ctx, jsonData, model)
+		if lastErr == nil {
+			return result, nil
+		}
+
+		if !isTransientError(lastErr) {
+			return CompletionResponse{}, lastErr
+		}
+
+		logger.Warn("Transient error from OpenAI API, will retry",
+			"attempt", attempt+1,
+			"max_retries", c.retries,
+			"error", lastErr)
+	}
+
+	return CompletionResponse{}, fmt.Errorf("failed after %d retries: %w", c.retries, lastErr)
 }

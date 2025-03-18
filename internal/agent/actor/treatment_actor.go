@@ -38,39 +38,66 @@ func NewTreatmentActor(ctx context.Context, config actor.ActorConfig, system act
 		knowledgeBase:    kb,
 		resultRepository: resultRepo,
 		treatmentTemplate: `
-You are an experienced medical treatment specialist.
-Based on the following patient information and diagnosis, create a comprehensive treatment plan:
+You are a senior medical specialist with expertise in developing comprehensive treatment plans.
+Based on the provided patient information and diagnosis, create an evidence-based treatment plan.
 
 PATIENT INFORMATION:
 Age: {{.Age}}
 Gender: {{.Gender}}
-Medical Conditions: {{.Conditions}}
+Medical History: {{.Conditions}}
 Current Medications: {{.Medications}}
-Allergies: {{.Allergies}}
+Known Allergies: {{.Allergies}}
 
-DIAGNOSIS:
-{{.Diagnosis}}
+DIAGNOSTIC ASSESSMENT:
+Primary Diagnosis: {{.Diagnosis}}
 
 DIAGNOSTIC REASONING:
 {{.Reasoning}}
 
-Please provide:
-1. Recommended treatments in order of priority
-2. Medication recommendations with dosing
-3. Lifestyle modifications
-4. Follow-up care plan
-5. Warning signs to watch for
-6. Any contraindications or precautions
+TREATMENT PLAN INSTRUCTIONS:
+1. Recommend treatments in order of priority, including non-pharmaceutical interventions
+2. Suggest appropriate medications with specific dosing information
+3. Recommend lifestyle modifications tailored to the patient's condition
+4. Develop a follow-up care plan with specific timeframes
+5. List important warning signs that would necessitate immediate medical attention
+6. Note any contraindications or precautions based on the patient's profile
 
-Format your response as JSON with the following structure:
+FORMAT YOUR RESPONSE AS JSON:
 {
-  "recommendations": ["Recommendation 1", "Recommendation 2"],
-  "medications": ["Medication 1", "Medication 2"],
-  "lifestyle_changes": ["Change 1", "Change 2"],
-  "follow_up": ["Follow-up 1", "Follow-up 2"],
-  "warnings": ["Warning 1", "Warning 2"],
-  "contraindications": ["Contraindication 1", "Contraindication 2"]
-}`,
+  "recommendations": [
+    "First-line treatment recommendation",
+    "Second-line treatment recommendation",
+    "Additional treatment considerations"
+  ],
+  "medications": [
+    "Medication 1: dosage, frequency, duration",
+    "Medication 2: dosage, frequency, duration"
+  ],
+  "lifestyle_changes": [
+    "Specific lifestyle modification 1",
+    "Specific lifestyle modification 2"
+  ],
+  "follow_up": [
+    "Immediate follow-up in X weeks",
+    "Tests to perform at follow-up",
+    "Monitoring parameters"
+  ],
+  "warnings": [
+    "Warning sign 1 requiring immediate attention",
+    "Warning sign 2 requiring immediate attention"
+  ],
+  "contraindications": [
+    "Specific contraindication 1",
+    "Specific contraindication 2"
+  ]
+}
+
+TREATMENT CONSIDERATIONS:
+- Prioritize evidence-based treatments appropriate for the diagnosed condition
+- Consider the patient's age, comorbidities, and current medications when recommending treatments
+- Include both pharmacological and non-pharmacological interventions where appropriate
+- Be specific about medication dosing, frequency, and duration
+- Consider treatment cost and accessibility when making recommendations`,
 	}, nil
 }
 
@@ -257,10 +284,11 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 		MaxTokens:    1024,
 		Temperature:  0.3,
 		ModelName:    "gpt-4",
-		SystemPrompt: "You are an AI medical assistant with expertise in treatment planning.",
+		SystemPrompt: "You are an expert healthcare provider with extensive knowledge of treatment protocols and medication management.",
 	})
 
 	if err != nil {
+		logger.Error("AI treatment plan generation failed", "error", err)
 		return map[string]any{
 			"recommendations": []string{"Error in treatment planning process", "Please consult with a healthcare provider"},
 			"warnings":        []string{"Treatment plan could not be generated due to AI service error: " + err.Error()},
@@ -269,7 +297,14 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 	}
 
 	var aiTreatment map[string]any
-	if err := json.Unmarshal([]byte(aiResponse.Text), &aiTreatment); err != nil {
+
+	treatmentText := extractJSON(aiResponse.Text)
+
+	if err := json.Unmarshal([]byte(treatmentText), &aiTreatment); err != nil {
+		logger.Error("Failed to parse AI treatment response",
+			"error", err,
+			"response", aiResponse.Text)
+
 		return map[string]any{
 			"recommendations": []string{"Treatment information available but not properly formatted"},
 			"warnings":        []string{"AI treatment information could not be parsed"},
@@ -277,6 +312,8 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 			"follow_up":       []string{"Please review the treatment information and consult with a healthcare provider"},
 		}
 	}
+
+	validateAndNormalizeTreatmentResponse(aiTreatment)
 
 	if len(interactions) > 0 {
 		warnings := make([]any, 0)
@@ -341,4 +378,42 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 	}
 
 	return aiTreatment
+}
+
+func validateAndNormalizeTreatmentResponse(treatment map[string]any) {
+	if _, exists := treatment["recommendations"]; !exists {
+		treatment["recommendations"] = []string{"No specific recommendations provided"}
+	} else if _, ok := treatment["recommendations"].([]any); !ok {
+		treatment["recommendations"] = []string{"No specific recommendations provided"}
+	}
+
+	if _, exists := treatment["medications"]; !exists {
+		treatment["medications"] = []string{}
+	} else if _, ok := treatment["medications"].([]any); !ok {
+		treatment["medications"] = []string{}
+	}
+
+	if _, exists := treatment["lifestyle_changes"]; !exists {
+		treatment["lifestyle_changes"] = []string{}
+	} else if _, ok := treatment["lifestyle_changes"].([]any); !ok {
+		treatment["lifestyle_changes"] = []string{}
+	}
+
+	if _, exists := treatment["follow_up"]; !exists {
+		treatment["follow_up"] = []string{"Schedule follow-up with healthcare provider"}
+	} else if _, ok := treatment["follow_up"].([]any); !ok {
+		treatment["follow_up"] = []string{"Schedule follow-up with healthcare provider"}
+	}
+
+	if _, exists := treatment["warnings"]; !exists {
+		treatment["warnings"] = []string{}
+	} else if _, ok := treatment["warnings"].([]any); !ok {
+		treatment["warnings"] = []string{}
+	}
+
+	if _, exists := treatment["contraindications"]; !exists {
+		treatment["contraindications"] = []string{}
+	} else if _, ok := treatment["contraindications"].([]any); !ok {
+		treatment["contraindications"] = []string{}
+	}
 }
