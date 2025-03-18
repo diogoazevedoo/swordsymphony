@@ -1,0 +1,26 @@
+[
+  {
+    "medication1": "aspirin",
+    "medication2": "warfarin",
+    "severity": "high",
+    "description": "Increased risk of bleeding when used together"
+  },
+  {
+    "medication1": "lisinopril",
+    "medication2": "metformin",
+    "severity": "moderate",
+    "description": "May enhance the hypoglycemic effect of metformin"
+  },
+  {
+    "medication1": "warfarin",
+    "medication2": "metformin",
+    "severity": "moderate",
+    "description": "Metformin may enhance the anticoagulant effect of warfarin"
+  },
+  {
+    "medication1": "aspirin",
+    "medication2": "lisinopril",
+    "severity": "moderate",
+    "description": "May decrease the antihypertensive effect of ACE inhibitors"
+  }
+]

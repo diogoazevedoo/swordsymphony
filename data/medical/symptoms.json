@@ -1,0 +1,62 @@
+{
+  "s001": {
+    "id": "s001",
+    "name": "Chest Pain",
+    "description": "Discomfort or pain in the chest",
+    "related_to": ["c001", "c004"]
+  },
+  "s002": {
+    "id": "s002",
+    "name": "Shortness of Breath",
+    "description": "Difficulty breathing or dyspnea",
+    "related_to": ["c001", "c004", "c005"]
+  },
+  "s003": {
+    "id": "s003",
+    "name": "Fatigue",
+    "description": "Feeling of tiredness or exhaustion",
+    "related_to": ["c001", "c003", "c004"]
+  },
+  "s004": {
+    "id": "s004",
+    "name": "Dizziness",
+    "description": "Feeling lightheaded or unsteady",
+    "related_to": ["c001", "c002"]
+  },
+  "s005": {
+    "id": "s005",
+    "name": "Headache",
+    "description": "Pain in the head or upper neck",
+    "related_to": ["c002"]
+  },
+  "s006": {
+    "id": "s006",
+    "name": "Increased Thirst",
+    "description": "Feeling the need to drink more fluids than usual",
+    "related_to": ["c003"]
+  },
+  "s007": {
+    "id": "s007",
+    "name": "Frequent Urination",
+    "description": "Need to urinate more often than usual",
+    "related_to": ["c003"]
+  },
+  "s008": {
+    "id": "s008",
+    "name": "Cough with Phlegm",
+    "description": "Coughing up mucus or sputum",
+    "related_to": ["c004"]
+  },
+  "s009": {
+    "id": "s009",
+    "name": "Fever",
+    "description": "Elevated body temperature",
+    "related_to": ["c004"]
+  },
+  "s010": {
+    "id": "s010",
+    "name": "Wheezing",
+    "description": "Whistling sound when breathing",
+    "related_to": ["c005"]
+  }
+}

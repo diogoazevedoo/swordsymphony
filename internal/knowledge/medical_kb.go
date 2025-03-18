@@ -1,6 +1,8 @@
 package knowledge
 
 import (
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -52,16 +54,21 @@ type InteractionRule struct {
 
 // NewMedicalKnowledgeBase creates a new knowledge base
 func NewMedicalKnowledgeBase(dataPath string) (*MedicalKnowledgeBase, error) {
-	kb := &MedicalKnowledgeBase{
-		conditions:  make(map[string]Condition),
-		medications: make(map[string]Medication),
-		symptoms:    make(map[string]Symptom),
+	if dataPath != "" && dataPath != "embedded" {
+		fileInfo, err := os.Stat(dataPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("data path does not exist: %s", dataPath)
+			}
+			return nil, fmt.Errorf("error accessing data path: %w", err)
+		}
+
+		if !fileInfo.IsDir() {
+			return nil, fmt.Errorf("data path is not a directory: %s", dataPath)
+		}
 	}
 
-	// Load embedded knowledge for demos
-	kb.loadEmbeddedKnowledge()
-
-	return kb, nil
+	return LoadMedicalDataFromJSON(dataPath)
 }
 
 // LookupCondition looks up a condition by name or ID

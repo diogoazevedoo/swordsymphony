@@ -1,0 +1,63 @@
+{
+  "m001": {
+    "id": "m001",
+    "name": "Aspirin",
+    "description": "Blood thinner that prevents clotting",
+    "used_for": ["pain relief", "fever reduction", "heart attack prevention"],
+    "contraindications": ["bleeding disorders", "ulcers", "aspirin allergy"],
+    "side_effects": ["stomach upset", "bleeding", "rash"]
+  },
+  "m002": {
+    "id": "m002",
+    "name": "Lisinopril",
+    "description": "ACE inhibitor for blood pressure control",
+    "used_for": [
+      "hypertension",
+      "heart failure",
+      "kidney protection in diabetes"
+    ],
+    "contraindications": [
+      "pregnancy",
+      "history of angioedema",
+      "renal artery stenosis"
+    ],
+    "side_effects": ["cough", "dizziness", "high potassium levels"]
+  },
+  "m003": {
+    "id": "m003",
+    "name": "Metformin",
+    "description": "Oral medication that lowers blood sugar",
+    "used_for": ["type 2 diabetes", "insulin resistance", "prediabetes"],
+    "contraindications": ["kidney disease", "liver disease", "alcohol abuse"],
+    "side_effects": [
+      "diarrhea",
+      "nausea",
+      "abdominal pain",
+      "vitamin B12 deficiency"
+    ]
+  },
+  "m004": {
+    "id": "m004",
+    "name": "Albuterol",
+    "description": "Bronchodilator that relaxes muscles in the airways",
+    "used_for": ["asthma", "COPD", "bronchitis", "other lung conditions"],
+    "contraindications": ["hypersensitivity to albuterol", "tachyarrhythmias"],
+    "side_effects": ["tremor", "nervousness", "headache", "rapid heart rate"]
+  },
+  "m005": {
+    "id": "m005",
+    "name": "Warfarin",
+    "description": "Anticoagulant that prevents blood clot formation",
+    "used_for": [
+      "prevention of blood clots",
+      "atrial fibrillation",
+      "deep vein thrombosis"
+    ],
+    "contraindications": [
+      "active bleeding",
+      "severe liver disease",
+      "pregnancy"
+    ],
+    "side_effects": ["bleeding", "bruising", "nausea", "hair loss"]
+  }
+}

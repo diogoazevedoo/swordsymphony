@@ -1,0 +1,81 @@
+{
+  "c001": {
+    "id": "c001",
+    "name": "Coronary Artery Disease",
+    "description": "Narrowing or blockage of the coronary arteries",
+    "symptoms": ["chest pain", "shortness of breath", "fatigue", "dizziness"],
+    "risk_factors": [
+      "hypertension",
+      "diabetes",
+      "smoking",
+      "high cholesterol",
+      "age > 60"
+    ]
+  },
+  "c002": {
+    "id": "c002",
+    "name": "Hypertension",
+    "description": "High blood pressure",
+    "symptoms": ["headache", "dizziness", "blurred vision", "nosebleeds"],
+    "risk_factors": [
+      "obesity",
+      "high sodium diet",
+      "sedentary lifestyle",
+      "family history"
+    ]
+  },
+  "c003": {
+    "id": "c003",
+    "name": "Type 2 Diabetes",
+    "description": "Metabolic disorder characterized by high blood sugar",
+    "symptoms": [
+      "increased thirst",
+      "frequent urination",
+      "increased hunger",
+      "weight loss",
+      "fatigue"
+    ],
+    "risk_factors": [
+      "obesity",
+      "sedentary lifestyle",
+      "family history",
+      "age > 45"
+    ]
+  },
+  "c004": {
+    "id": "c004",
+    "name": "Pneumonia",
+    "description": "Infection that inflames air sacs in one or both lungs",
+    "symptoms": [
+      "chest pain",
+      "cough with phlegm",
+      "fever",
+      "shortness of breath",
+      "fatigue"
+    ],
+    "risk_factors": [
+      "smoking",
+      "chronic lung disease",
+      "weakened immune system",
+      "age > 65"
+    ]
+  },
+  "c005": {
+    "id": "c005",
+    "name": "Asthma",
+    "description": "Chronic condition affecting the airways in the lungs",
+    "symptoms": [
+      "wheezing",
+      "shortness of breath",
+      "chest tightness",
+      "coughing"
+    ],
+    "risk_factors": [
+      "allergies",
+      "family history",
+      "obesity",
+      "smoking",
+      "air pollution"
+    ]
+  }
+}

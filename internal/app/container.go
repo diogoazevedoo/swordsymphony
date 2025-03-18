@@ -52,7 +52,18 @@ func (c *Container) initAIClient() error {
 // Initialize medical knowledge base
 func (c *Container) initKnowledgeBase() error {
 	var err error
-	c.KnowledgeBase, err = knowledge.NewMedicalKnowledgeBase(c.Config.Medical.DataPath)
+	dataPath := c.Config.Medical.DataPath
+	if dataPath == "" {
+		dataPath = "./data/medical"
+	}
+
+	c.KnowledgeBase, err = knowledge.NewMedicalKnowledgeBase(dataPath)
+	if err != nil {
+		logger.Warn("Failed to load medical knowledge base from path, using embedded data",
+			"path", dataPath, "error", err)
+		c.KnowledgeBase, err = knowledge.NewMedicalKnowledgeBase("embedded")
+	}
+
 	return err
 }
 
