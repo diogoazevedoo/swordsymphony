@@ -7,7 +7,7 @@ import (
 )
 
 // HealthCheck provides a simple endpoint to verify the API is running
-func (h *Handler) HealthCheck(c *gin.Context) {
+func (h *ActorHandler) HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
 		"service": "SwordSymphony API",

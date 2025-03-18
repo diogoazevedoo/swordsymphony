@@ -5,20 +5,24 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/diogoazevedoo/swordsymphony/internal/agent"
+	"github.com/diogoazevedoo/swordsymphony/internal/actor"
+	actorAgent "github.com/diogoazevedoo/swordsymphony/internal/agent/actor"
 	"github.com/diogoazevedoo/swordsymphony/internal/config"
+	"github.com/diogoazevedoo/swordsymphony/internal/domain"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
-	"github.com/diogoazevedoo/swordsymphony/internal/orchestrator"
 	"github.com/diogoazevedoo/swordsymphony/internal/server"
 	"github.com/diogoazevedoo/swordsymphony/internal/server/handler"
+	"github.com/diogoazevedoo/swordsymphony/internal/workflow"
 )
 
 // Application represents the main application
 type Application struct {
-	container    *Container
-	orchestrator *orchestrator.Orchestrator
-	server       *server.Server
-	isShutdown   bool
+	container      *Container
+	actorSystem    actor.ActorSystem
+	actorRegistry  *actor.Registry
+	workflowEngine *workflow.WorkflowEngine
+	server         *server.Server
+	isShutdown     bool
 }
 
 // NewApplication creates and initializes a new application
@@ -29,11 +33,14 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 	}
 
 	app := &Application{
-		container: container,
+		container:      container,
+		actorSystem:    actor.NewActorSystem(),
+		actorRegistry:  actor.NewRegistry(),
+		workflowEngine: workflow.NewWorkflowEngine(),
 	}
 
-	if err := app.initOrchestrator(); err != nil {
-		return nil, fmt.Errorf("failed to initialize orchestrator: %w", err)
+	if err := app.initActorSystem(); err != nil {
+		return nil, fmt.Errorf("failed to initialize actor system: %w", err)
 	}
 
 	if err := app.initServer(); err != nil {
@@ -43,26 +50,79 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 	return app, nil
 }
 
-// Initialize orchestrator and agents
-func (a *Application) initOrchestrator() error {
-	a.orchestrator = orchestrator.NewOrchestrator()
+// Initialize actor system and agents
+func (a *Application) initActorSystem() error {
+	if err := a.actorSystem.Start(); err != nil {
+		return fmt.Errorf("failed to start actor system: %w", err)
+	}
 
-	intakeAgent := agent.NewIntakeAgent()
-	diagnosticAgent := agent.NewDiagnosticAgent(a.container.AIClient, a.container.KnowledgeBase)
-	treatmentAgent := agent.NewTreatmentAgent(a.container.AIClient, a.container.KnowledgeBase, a.container.ResultRepo)
+	ctx := context.Background()
 
-	a.orchestrator.RegisterAgent(intakeAgent)
-	a.orchestrator.RegisterAgent(diagnosticAgent)
-	a.orchestrator.RegisterAgent(treatmentAgent)
+	if err := actorAgent.CreateStandardActors(
+		a.actorRegistry,
+		a.container.AIClient,
+		a.container.KnowledgeBase,
+		a.container.ResultRepo,
+	); err != nil {
+		return fmt.Errorf("failed to register standard agents: %w", err)
+	}
 
-	a.orchestrator.StartProcessing()
+	if err := actorAgent.CreateSystemActors(ctx, a.actorRegistry, a.actorSystem); err != nil {
+		return fmt.Errorf("failed to create system actors: %w", err)
+	}
+
+	agentConfigs, err := config.LoadAgentConfigsFromDirectory("./configs/agents")
+	if err != nil {
+		logger.Warn("Failed to load agent configurations", "error", err)
+	}
+
+	for _, agentConfig := range agentConfigs {
+		actorConfig := agentConfig.ToActorConfig()
+
+		agent, err := a.actorRegistry.Create(ctx, actorConfig, a.actorSystem)
+		if err != nil {
+			logger.Error("Failed to create agent", "id", agentConfig.ID, "error", err)
+			continue
+		}
+
+		if err := a.actorSystem.Register(agent); err != nil {
+			logger.Error("Failed to register agent", "id", agentConfig.ID, "error", err)
+			continue
+		}
+
+		logger.Info("Agent created and registered", "id", agentConfig.ID, "type", agentConfig.Type)
+	}
+
+	workflowDefs, err := loadWorkflowDefinitions("./configs/workflows")
+	if err != nil {
+		logger.Warn("Failed to load workflow definitions", "error", err)
+		// We'll continue even if we can't load workflows
+	}
+
+	for _, workflowDef := range workflowDefs {
+		if err := a.workflowEngine.RegisterWorkflow(workflowDef); err != nil {
+			logger.Error("Failed to register workflow", "id", workflowDef.ID, "error", err)
+			continue
+		}
+	}
 
 	return nil
 }
 
+// loadWorkflowDefinitions loads workflow definitions from a directory
+func loadWorkflowDefinitions(dirPath string) ([]workflow.WorkflowDefinition, error) {
+	var definitions []workflow.WorkflowDefinition
+
+	// TODO: Implement loading workflow definitions from files
+
+	return definitions, nil
+}
+
 // Initialize HTTP server
 func (a *Application) initServer() error {
-	h := handler.NewHandler(a.orchestrator, a.container.CaseRepo, a.container.ResultRepo)
+	orchestratorAddr := actor.Address(domain.OrchestratorAgentType)
+
+	h := handler.NewActorHandler(a.actorSystem, orchestratorAddr, a.container.CaseRepo, a.container.ResultRepo)
 
 	address := fmt.Sprintf(":%s", a.container.Config.Server.Port)
 	a.server = server.NewServer(address)
@@ -92,7 +152,7 @@ func (a *Application) Stop() error {
 	defer cancel()
 
 	serverDone := make(chan struct{})
-	orchestratorDone := make(chan struct{})
+	actorSystemDone := make(chan struct{})
 
 	if a.server != nil {
 		go func() {
@@ -106,16 +166,16 @@ func (a *Application) Stop() error {
 		close(serverDone)
 	}
 
-	if a.orchestrator != nil {
+	if a.actorSystem != nil {
 		go func() {
-			logger.Info("Shutting down orchestrator")
-			if err := a.orchestrator.Shutdown(shutdownCtx); err != nil {
-				logger.Error("Error shutting down orchestrator", "error", err)
+			logger.Info("Shutting down actor system")
+			if err := a.actorSystem.Stop(shutdownCtx); err != nil {
+				logger.Error("Error shutting down actor system", "error", err)
 			}
-			close(orchestratorDone)
+			close(actorSystemDone)
 		}()
 	} else {
-		close(orchestratorDone)
+		close(actorSystemDone)
 	}
 
 	select {
@@ -127,8 +187,8 @@ func (a *Application) Stop() error {
 		select {
 		case <-shutdownCtx.Done():
 			return fmt.Errorf("shutdown timed out after server")
-		case <-orchestratorDone:
-			logger.Info("Orchestrator shutdown complete")
+		case <-actorSystemDone:
+			logger.Info("Actor system shutdown complete")
 		}
 	}
 

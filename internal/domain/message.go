@@ -40,14 +40,30 @@ func NewMessage(
 ) *Message {
 	return &Message{
 		ID:               uuid.New(),
-		ThreadID:         uuid.Nil, // Set by orchestrator
+		ThreadID:         uuid.Nil,
 		Sender:           sender,
 		SenderName:       senderName,
 		Recipient:        recipient,
 		MessageType:      msgType,
-		Priority:         3, // Default priority
+		Priority:         3,
 		Content:          content,
 		RequiresResponse: false,
 		Timestamp:        time.Now(),
 	}
+}
+
+// TaskThread represents the conversation thread for a specific task
+type TaskThread struct {
+	TaskID         uuid.UUID       `json:"task_id"`
+	ThreadID       uuid.UUID       `json:"thread_id"`
+	Status         string          `json:"status"`
+	StartTime      time.Time       `json:"start_time"`
+	Messages       []Message       `json:"messages"`
+	AgentsInvolved map[string]bool `json:"agents_involved"`
+}
+
+// TaskInfo represents the output of StartTask
+type TaskInfo struct {
+	TaskID   uuid.UUID `json:"task_id"`
+	ThreadID uuid.UUID `json:"thread_id"`
 }

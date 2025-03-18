@@ -1,0 +1,41 @@
+id: "custom_respiratory_diagnostic"
+type: "diagnostic"
+name: "Respiratory Specialist Diagnostic Agent"
+description: "Specialized agent for diagnosing respiratory conditions"
+
+inputs:
+  - name: "patient_data"
+    required: true
+    schema:
+      type: "object"
+      properties:
+        symptoms:
+          type: "array"
+          items:
+            type: "string"
+        vitals:
+          type: "object"
+
+outputs:
+  - name: "diagnosis"
+    schema:
+      type: "object"
+      properties:
+        potential_diagnoses:
+          type: "array"
+          items:
+            type: "string"
+        confidence:
+          type: "number"
+
+ai:
+  provider: "openai"
+  model: "gpt-4"
+  temperature: 0.3
+  max_tokens: 1024
+  system_prompt: >
+    You are a respiratory specialist with expertise in diagnosing respiratory conditions.
+    Focus on respiratory system diseases, disorders, and conditions.
+    Pay special attention to symptoms related to breathing difficulties, cough patterns, and respiratory distress.
+  knowledge_sources:
+    - "respiratory_conditions_kb"

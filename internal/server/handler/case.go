@@ -4,11 +4,12 @@ import (
 	"net/http"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/gin-gonic/gin"
 )
 
 // GetDemoCases returns available demo cases
-func (h *Handler) GetDemoCases(c *gin.Context) {
+func (h *ActorHandler) GetDemoCases(c *gin.Context) {
 	cases, err := h.caseRepository.GetDemoCases()
 	if err != nil {
 		handleError(c, err)
@@ -19,7 +20,7 @@ func (h *Handler) GetDemoCases(c *gin.Context) {
 }
 
 // StartCase initiates processing for a demo case
-func (h *Handler) StartCase(c *gin.Context) {
+func (h *ActorHandler) StartCase(c *gin.Context) {
 	caseID := c.Param("case_id")
 
 	caseData, err := h.caseRepository.GetCaseByID(caseID)
@@ -32,7 +33,13 @@ func (h *Handler) StartCase(c *gin.Context) {
 		caseData["case_id"] = caseID
 	}
 
-	task := h.orchestrator.StartTask(map[string]any{
+	orchestrator, err := h.getOrchestrator()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	task := orchestrator.StartTask(map[string]interface{}{
 		"patient_data": caseData,
 		"scenario":     caseID,
 	})
@@ -48,10 +55,56 @@ func (h *Handler) StartCase(c *gin.Context) {
 	})
 }
 
-// GetCaseStatus returns the current status of processing
-func (h *Handler) GetCaseStatus(c *gin.Context) {
-	agentStatus := h.orchestrator.GetAgentStatus()
+// StartWorkflow initiates a case using a predefined workflow
+func (h *ActorHandler) StartWorkflow(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	caseID := c.Param("case_id")
 
+	caseData, err := h.caseRepository.GetCaseByID(caseID)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	if caseData != nil {
+		caseData["case_id"] = caseID
+	}
+
+	logger.Info("Starting workflow", "workflow_id", workflowID, "case_id", caseID)
+
+	orchestrator, err := h.getOrchestrator()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	task := orchestrator.StartTask(map[string]interface{}{
+		"patient_data": caseData,
+		"scenario":     caseID,
+		"workflow_id":  workflowID,
+	})
+
+	h.caseRepository.SetCurrentCase(caseData)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "started",
+		"workflow_id":  workflowID,
+		"case_id":      caseID,
+		"task_id":      task.TaskID,
+		"thread_id":    task.ThreadID,
+		"patient_name": caseData["name"],
+	})
+}
+
+// GetCaseStatus returns the current status of processing
+func (h *ActorHandler) GetCaseStatus(c *gin.Context) {
+	orchestrator, err := h.getOrchestrator()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	agentStatus := orchestrator.GetAgentStatus()
 	currentCase := h.caseRepository.GetCurrentCase()
 
 	if currentCase == nil {
@@ -75,11 +128,11 @@ func (h *Handler) GetCaseStatus(c *gin.Context) {
 	progress := make(map[string]int)
 	for agent, status := range agentStatus {
 		switch status {
-		case "idle":
+		case domain.AgentIdle:
 			progress[agent] = 0
-		case "busy":
+		case domain.AgentBusy:
 			progress[agent] = 50
-		case "complete":
+		case domain.AgentComplete:
 			progress[agent] = 100
 		default:
 			progress[agent] = 0
@@ -96,7 +149,7 @@ func (h *Handler) GetCaseStatus(c *gin.Context) {
 }
 
 // GetResults returns the results for a processed case
-func (h *Handler) GetResults(c *gin.Context) {
+func (h *ActorHandler) GetResults(c *gin.Context) {
 	caseID := c.Param("case_id")
 
 	results, err := h.resultRepository.GetResultsByCaseID(caseID)

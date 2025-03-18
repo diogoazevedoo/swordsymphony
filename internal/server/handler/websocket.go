@@ -18,7 +18,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // WebSocketHandler handles WebSocket connections
-func (h *Handler) WebSocketHandler(c *gin.Context) {
+func (h *ActorHandler) WebSocketHandler(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade connection: %v", err)
@@ -26,8 +26,14 @@ func (h *Handler) WebSocketHandler(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	messageCh := h.orchestrator.Subscribe()
-	defer h.orchestrator.Unsubscribe(messageCh)
+	orchestrator, err := h.getOrchestrator()
+	if err != nil {
+		log.Printf("Failed to get orchestrator: %v", err)
+		return
+	}
+
+	messageCh := orchestrator.Subscribe()
+	defer orchestrator.Unsubscribe(messageCh)
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

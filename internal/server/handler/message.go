@@ -9,11 +9,11 @@ import (
 )
 
 // GetMessages returns all messages in the system
-func (h *Handler) GetMessages(c *gin.Context) {
+func (h *ActorHandler) GetMessages(c *gin.Context) {
 	threadID := c.Query("thread_id")
 
 	if threadID == "" {
-		c.JSON(http.StatusOK, []any{})
+		c.JSON(http.StatusOK, []interface{}{})
 		return
 	}
 
@@ -23,7 +23,13 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		return
 	}
 
-	messages := h.orchestrator.GetAllMessages(threadUUID)
+	orchestrator, err := h.getOrchestrator()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	messages := orchestrator.GetAllMessages(threadUUID)
 
 	c.JSON(http.StatusOK, messages)
 }
