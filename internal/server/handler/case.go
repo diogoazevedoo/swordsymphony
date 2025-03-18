@@ -39,7 +39,7 @@ func (h *ActorHandler) StartCase(c *gin.Context) {
 		return
 	}
 
-	task := orchestrator.StartTask(map[string]interface{}{
+	task := orchestrator.StartTask(map[string]any{
 		"patient_data": caseData,
 		"scenario":     caseID,
 	})
@@ -78,7 +78,7 @@ func (h *ActorHandler) StartWorkflow(c *gin.Context) {
 
 	logger.Info("Starting workflow", "workflow_id", workflowID, "case_id", caseID)
 
-	instance, err := workflowEngine.StartWorkflow(c.Request.Context(), workflowID, map[string]interface{}{
+	instance, err := workflowEngine.StartWorkflow(c.Request.Context(), workflowID, map[string]any{
 		"patient_data": caseData,
 	})
 

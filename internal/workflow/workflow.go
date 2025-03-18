@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
 	"github.com/google/uuid"
@@ -713,4 +714,30 @@ func LoadWorkflowDefinitions(dirPath string) ([]WorkflowDefinition, error) {
 	}
 
 	return definitions, nil
+}
+
+// GetAllWorkflows returns all registered workflow definitions
+func (e *WorkflowEngine) GetAllWorkflows() []WorkflowDefinition {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	workflows := make([]WorkflowDefinition, 0, len(e.definitions))
+	for _, workflow := range e.definitions {
+		workflows = append(workflows, workflow)
+	}
+
+	return workflows
+}
+
+// GetWorkflow returns a specific workflow definition
+func (e *WorkflowEngine) GetWorkflow(workflowID string) (WorkflowDefinition, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	workflow, exists := e.definitions[workflowID]
+	if !exists {
+		return WorkflowDefinition{}, errors.NotFound("Workflow not found", "workflow_not_found")
+	}
+
+	return workflow, nil
 }

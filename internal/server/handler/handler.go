@@ -7,6 +7,8 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
+	"github.com/diogoazevedoo/swordsymphony/internal/server/response"
+	"github.com/diogoazevedoo/swordsymphony/internal/server/ws"
 	"github.com/diogoazevedoo/swordsymphony/internal/workflow"
 	"github.com/gin-gonic/gin"
 )
@@ -18,6 +20,7 @@ type ActorHandler struct {
 	caseRepository   repository.CaseRepository
 	resultRepository repository.ResultRepository
 	workflowEngine   *workflow.WorkflowEngine
+	wsManager        *ws.ClientManager
 }
 
 // NewActorHandler creates a new handler instance using actor system
@@ -34,23 +37,13 @@ func NewActorHandler(
 		caseRepository:   caseRepo,
 		resultRepository: resultRepo,
 		workflowEngine:   workflowEngine,
+		wsManager:        ws.NewClientManager(),
 	}
 }
 
-// handleError templates the errors
+// handleError sends an error response to the client
 func handleError(c *gin.Context, err error) {
-	if appErr, ok := err.(*errors.AppError); ok {
-		c.JSON(appErr.HTTPStatusCode(), gin.H{
-			"error": appErr.Message,
-			"code":  appErr.Code,
-		})
-		return
-	}
-
-	c.JSON(http.StatusInternalServerError, gin.H{
-		"error": err.Error(),
-		"code":  "internal_error",
-	})
+	response.Error(c, err)
 }
 
 // getOrchestrator returns the orchestrator actor

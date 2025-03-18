@@ -180,3 +180,15 @@ func (r *CaseRepository) InitializeDemoCases() error {
 
 	return nil
 }
+
+func (r *CaseRepository) StoreCase(id string, caseData map[string]any, isDemo bool) error {
+	if id == "" {
+		return errors.Validation("Case ID cannot be empty", "empty_case_id")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.cases[id] = caseData
+	return nil
+}

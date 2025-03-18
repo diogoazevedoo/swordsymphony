@@ -1,11 +1,12 @@
 package handler
 
 import (
-	"log"
 	"net/http"
-	"time"
 
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
+	"github.com/diogoazevedoo/swordsymphony/internal/server/ws"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -21,54 +22,35 @@ var upgrader = websocket.Upgrader{
 func (h *ActorHandler) WebSocketHandler(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
+		logger.Error("Failed to upgrade WebSocket connection", "error", err)
 		return
 	}
-	defer conn.Close()
+
+	clientID := uuid.New().String()
+	threadID := c.Query("thread_id")
+
+	client := &ws.Client{
+		ID:       clientID,
+		Conn:     conn,
+		Send:     make(chan ws.Event, 100),
+		ThreadID: threadID,
+	}
+
+	h.wsManager.Register(client)
+
+	client.Start(h.wsManager)
 
 	orchestrator, err := h.getOrchestrator()
 	if err != nil {
-		log.Printf("Failed to get orchestrator: %v", err)
+		logger.Error("Failed to get orchestrator", "error", err)
 		return
 	}
 
 	messageCh := orchestrator.Subscribe()
-	defer orchestrator.Unsubscribe(messageCh)
-
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
 	go func() {
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err,
-					websocket.CloseGoingAway,
-					websocket.CloseAbnormalClosure) {
-					log.Printf("WebSocket error: %v", err)
-				}
-				break
-			}
+		for msg := range messageCh {
+			event := ws.ConvertMessageToEvent(msg)
+			h.wsManager.Broadcast(event)
 		}
 	}()
-
-	for {
-		select {
-		case msg, ok := <-messageCh:
-			if !ok {
-				return
-			}
-
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Printf("Failed to write message: %v", err)
-				return
-			}
-
-		case <-ticker.C:
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("Failed to write ping: %v", err)
-				return
-			}
-		}
-	}
 }

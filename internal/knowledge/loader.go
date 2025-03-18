@@ -44,7 +44,7 @@ func LoadMedicalDataFromJSON(dataPath string) (*MedicalKnowledgeBase, error) {
 }
 
 // loadJSONFile loads data from a JSON file into the target data structure
-func loadJSONFile(filePath string, target interface{}) error {
+func loadJSONFile(filePath string, target any) error {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return fmt.Errorf("file does not exist: %s", filePath)
 	}

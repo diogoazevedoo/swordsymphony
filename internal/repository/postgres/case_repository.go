@@ -240,3 +240,49 @@ func (r *CaseRepository) InitializeDemoCases() error {
 
 	return nil
 }
+
+// StoreCase adds or updates a case in the PostgreSQL repository
+func (r *CaseRepository) StoreCase(id string, caseData map[string]any, isDemo bool) error {
+	if id == "" {
+		return errors.Validation("Case ID cannot be empty", "empty_case_id")
+	}
+
+	ctx, cancel := withTimeout(defaultTxTimeout)
+	defer cancel()
+
+	dataJSON, err := json.Marshal(caseData)
+	if err != nil {
+		return errors.Internal("Failed to encode case data to JSON", "json_encode_error")
+	}
+
+	var existingID string
+	checkQuery := `SELECT id FROM cases WHERE id = $1`
+	err = r.db.QueryRowContext(ctx, checkQuery, id).Scan(&existingID)
+
+	if err == nil {
+		updateQuery := `
+			UPDATE cases
+			SET data = $1, is_demo = $2, updated_at = NOW()
+			WHERE id = $3
+		`
+		_, err = r.db.ExecContext(ctx, updateQuery, dataJSON, isDemo, id)
+		if err != nil {
+			return errors.External(err, "Failed to update case", "db_update_error")
+		}
+		return nil
+	}
+
+	if err == sql.ErrNoRows {
+		insertQuery := `
+			INSERT INTO cases (id, data, is_demo, created_at, updated_at)
+			VALUES ($1, $2, $3, NOW(), NOW())
+		`
+		_, err = r.db.ExecContext(ctx, insertQuery, id, dataJSON, isDemo)
+		if err != nil {
+			return errors.External(err, "Failed to insert case", "db_insert_error")
+		}
+		return nil
+	}
+
+	return errors.External(err, "Failed to check existing case", "db_check_error")
+}

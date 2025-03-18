@@ -16,12 +16,16 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler) {
 	api := s.router.Group("/api")
 	{
 		api.GET("/demo-cases", h.GetDemoCases)
-
 		api.POST("/start-case/:case_id", h.StartCase)
 		api.GET("/case-status", h.GetCaseStatus)
 		api.GET("/results/:case_id", h.GetResults)
 
+		api.POST("/upload", h.UploadPatientData)
+
 		api.POST("/workflows/:workflow_id/start/:case_id", h.StartWorkflow)
+		api.GET("/workflows", h.GetWorkflows)
+		api.GET("/workflows/:workflow_id", h.GetWorkflowDetails)
+		api.GET("/workflow-instances/:instance_id", h.GetWorkflowInstance)
 
 		api.GET("/agents", h.GetAgents)
 		api.GET("/agents/:agent_id", h.GetAgentDetails)

@@ -19,6 +19,9 @@ type CaseRepository interface {
 
 	// InitializeDemoCases loads the initial set of demo cases
 	InitializeDemoCases() error
+
+	// StoreCase adds or updates a case in the repository
+	StoreCase(id string, caseData map[string]any, isDemo bool) error
 }
 
 // ResultRepository defines the interface for storing and retrieving processing results
