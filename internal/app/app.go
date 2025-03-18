@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/actor"
@@ -18,12 +17,14 @@ import (
 
 // Application represents the main application
 type Application struct {
-	container      *Container
-	actorSystem    actor.ActorSystem
-	actorRegistry  *actor.Registry
-	workflowEngine *workflow.WorkflowEngine
-	server         *server.Server
-	isShutdown     bool
+	container          *Container
+	actorSystem        actor.ActorSystem
+	actorRegistry      *actor.Registry
+	workflowEngine     *workflow.WorkflowEngine
+	server             *server.Server
+	isShutdown         bool
+	agentConfigService *config.AgentConfigService
+	workflowService    *workflow.WorkflowService
 }
 
 // NewApplication creates and initializes a new application
@@ -39,6 +40,17 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 		actorRegistry:  actor.NewRegistry(),
 		workflowEngine: workflow.NewWorkflowEngine(),
 	}
+
+	app.agentConfigService = config.NewAgentConfigService(
+		"./configs/agents",
+		app.actorRegistry,
+		app.actorSystem,
+	)
+
+	app.workflowService = workflow.NewWorkflowService(
+		app.workflowEngine,
+		"./configs/workflows",
+	)
 
 	if err := app.initActorSystem(); err != nil {
 		return nil, fmt.Errorf("failed to initialize actor system: %w", err)
@@ -72,51 +84,21 @@ func (a *Application) initActorSystem() error {
 		return fmt.Errorf("failed to create system actors: %w", err)
 	}
 
-	agentConfigs, err := config.LoadAgentConfigsFromDirectory("./configs/agents")
-	if err != nil {
-		logger.Warn("Failed to load agent configurations", "error", err)
+	if err := a.agentConfigService.Initialize(); err != nil {
+		logger.Warn("Failed to initialize agent configurations", "error", err)
 	}
 
-	for _, agentConfig := range agentConfigs {
-		actorConfig := agentConfig.ToActorConfig()
-
-		agent, err := a.actorRegistry.Create(ctx, actorConfig, a.actorSystem)
-		if err != nil {
-			logger.Error("Failed to create agent", "id", agentConfig.ID, "error", err)
-			continue
-		}
-
-		if err := a.actorSystem.Register(agent); err != nil {
-			logger.Error("Failed to register agent", "id", agentConfig.ID, "error", err)
-			continue
-		}
-
-		logger.Info("Agent created and registered", "id", agentConfig.ID, "type", agentConfig.Type)
+	if err := a.workflowService.Initialize(); err != nil {
+		logger.Warn("Failed to initialize workflows", "error", err)
 	}
 
-	workflowDefs, err := loadWorkflowDefinitions("./configs/workflows")
-	if err != nil {
-		logger.Warn("Failed to load workflow definitions", "error", err)
-		// We'll continue even if we can't load workflows
-	}
-
-	for _, workflowDef := range workflowDefs {
-		if err := a.workflowEngine.RegisterWorkflow(workflowDef); err != nil {
-			logger.Error("Failed to register workflow", "id", workflowDef.ID, "error", err)
-			continue
-		}
+	orchestratorAddr := actor.Address(domain.OrchestratorAgentType)
+	orchestrator, exists := a.actorSystem.GetActor(orchestratorAddr)
+	if exists {
+		a.workflowEngine.SetOrchestrator(orchestrator)
 	}
 
 	return nil
-}
-
-// loadWorkflowDefinitions loads workflow definitions from a directory
-func loadWorkflowDefinitions(dirPath string) ([]workflow.WorkflowDefinition, error) {
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("workflow directory does not exist: %s", dirPath)
-	}
-
-	return workflow.LoadWorkflowDefinitions(dirPath)
 }
 
 // Initialize HTTP server
@@ -131,14 +113,14 @@ func (a *Application) initServer() error {
 		a.workflowEngine,
 	)
 
-	orchestrator, exists := a.actorSystem.GetActor(orchestratorAddr)
-	if exists {
-		a.workflowEngine.SetOrchestrator(orchestrator)
-	}
+	adminH := handler.NewAdminHandler(
+		a.agentConfigService,
+		a.workflowService,
+	)
 
 	address := fmt.Sprintf(":%s", a.container.Config.Server.Port)
 	a.server = server.NewServer(address)
-	a.server.SetupRoutes(h)
+	a.server.SetupRoutes(h, adminH)
 
 	return nil
 }

@@ -25,11 +25,11 @@ const (
 
 // Event represents a WebSocket event
 type Event struct {
-	Type      EventType              `json:"type"`
-	Data      map[string]interface{} `json:"data"`
-	Timestamp int64                  `json:"timestamp"`
-	ThreadID  string                 `json:"thread_id,omitempty"`
-	TaskID    string                 `json:"task_id,omitempty"`
+	Type      EventType      `json:"type"`
+	Data      map[string]any `json:"data"`
+	Timestamp int64          `json:"timestamp"`
+	ThreadID  string         `json:"thread_id,omitempty"`
+	TaskID    string         `json:"task_id,omitempty"`
 }
 
 // Client represents a WebSocket client connection
@@ -99,7 +99,7 @@ func (manager *ClientManager) Start() {
 }
 
 // SendEvent broadcasts an event to all connected clients
-func (manager *ClientManager) SendEvent(eventType EventType, data map[string]interface{}, threadID string, taskID string) {
+func (manager *ClientManager) SendEvent(eventType EventType, data map[string]any, threadID string, taskID string) {
 	event := Event{
 		Type:      eventType,
 		Data:      data,
@@ -231,7 +231,7 @@ func (c *Client) readPump(manager *ClientManager) {
 			break
 		}
 
-		var clientCommand map[string]interface{}
+		var clientCommand map[string]any
 		if err := json.Unmarshal(message, &clientCommand); err == nil {
 			if action, ok := clientCommand["action"].(string); ok {
 				if action == "subscribe" && clientCommand["thread_id"] != nil {

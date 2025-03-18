@@ -17,9 +17,9 @@ func (h *ActorHandler) GetWorkflows(c *gin.Context) {
 
 	workflows := workflowEngine.GetAllWorkflows()
 
-	workflowList := make([]map[string]interface{}, 0, len(workflows))
+	workflowList := make([]map[string]any, 0, len(workflows))
 	for _, workflow := range workflows {
-		workflowList = append(workflowList, map[string]interface{}{
+		workflowList = append(workflowList, map[string]any{
 			"id":          workflow.ID,
 			"name":        workflow.Name,
 			"description": workflow.Description,

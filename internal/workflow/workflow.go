@@ -19,26 +19,79 @@ import (
 
 // WorkflowDefinition represents a complete workflow definition
 type WorkflowDefinition struct {
-	ID          string          `json:"id" yaml:"id"`
-	Name        string          `json:"name" yaml:"name"`
-	Description string          `json:"description" yaml:"description"`
-	Version     string          `json:"version" yaml:"version"`
-	Steps       []WorkflowStep  `json:"steps" yaml:"steps"`
-	Connections []Connection    `json:"connections" yaml:"connections"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty" yaml:"input_schema,omitempty"`
+	ID            string             `json:"id" yaml:"id"`
+	Name          string             `json:"name" yaml:"name"`
+	Description   string             `json:"description" yaml:"description"`
+	Version       string             `json:"version" yaml:"version"`
+	Steps         []WorkflowStep     `json:"steps" yaml:"steps"`
+	Connections   []Connection       `json:"connections" yaml:"connections"`
+	InputSchema   json.RawMessage    `json:"input_schema,omitempty" yaml:"input_schema,omitempty"`
+	OutputSchema  json.RawMessage    `json:"output_schema,omitempty" yaml:"output_schema,omitempty"`
+	Variables     []WorkflowVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
+	ErrorHandlers []ErrorHandler     `json:"error_handlers,omitempty" yaml:"error_handlers,omitempty"`
+	Triggers      []Trigger          `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	Schedule      *Schedule          `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+	Tags          []string           `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Metadata      map[string]any     `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Author        string             `json:"author,omitempty" yaml:"author,omitempty"`
+}
+
+// ErrorHandler defines how to handle errors in a workflow
+type ErrorHandler struct {
+	StepID       string `json:"step_id" yaml:"step_id"`
+	ErrorType    string `json:"error_type,omitempty" yaml:"error_type,omitempty"`
+	Action       string `json:"action" yaml:"action"`
+	MaxRetries   int    `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
+	RetryDelay   string `json:"retry_delay,omitempty" yaml:"retry_delay,omitempty"`
+	FallbackStep string `json:"fallback_step,omitempty" yaml:"fallback_step,omitempty"`
+}
+
+// Trigger defines when a workflow should be automatically triggered
+type Trigger struct {
+	Type        string         `json:"type" yaml:"type"`
+	Name        string         `json:"name" yaml:"name"`
+	Description string         `json:"description,omitempty" yaml:"description,omitempty"`
+	Config      map[string]any `json:"config" yaml:"config"`
+}
+
+// Schedule defines when a workflow should run on a schedule
+type Schedule struct {
+	Cron      string `json:"cron" yaml:"cron"`
+	Timezone  string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	StartDate string `json:"start_date,omitempty" yaml:"start_date,omitempty"`
+	EndDate   string `json:"end_date,omitempty" yaml:"end_date,omitempty"`
+}
+
+type RetryPolicy struct {
+	MaxRetries  int     `json:"max_retries" yaml:"max_retries"`
+	InitialWait string  `json:"initial_wait" yaml:"initial_wait"`
+	MaxWait     string  `json:"max_wait" yaml:"max_wait"`
+	Multiplier  float64 `json:"multiplier" yaml:"multiplier"`
+}
+
+type WorkflowVariable struct {
+	Name         string `json:"name" yaml:"name"`
+	Type         string `json:"type" yaml:"type"`
+	DefaultValue any    `json:"default_value,omitempty" yaml:"default_value,omitempty"`
+	Description  string `json:"description,omitempty" yaml:"description,omitempty"`
+	Required     bool   `json:"required" yaml:"required"`
 }
 
 // WorkflowStep represents a single step in a workflow
 type WorkflowStep struct {
-	ID          string         `json:"id" yaml:"id"`
-	Name        string         `json:"name" yaml:"name"`
-	Type        string         `json:"type" yaml:"type"`
-	AgentType   string         `json:"agent_type" yaml:"agent_type"`
-	Config      map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
-	Condition   string         `json:"condition,omitempty" yaml:"condition,omitempty"`
-	Parallel    bool           `json:"parallel,omitempty" yaml:"parallel,omitempty"`
-	MaxRetries  int            `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
-	TimeoutSecs int            `json:"timeout_secs,omitempty" yaml:"timeout_secs,omitempty"`
+	ID          string            `json:"id" yaml:"id"`
+	Name        string            `json:"name" yaml:"name"`
+	Type        string            `json:"type" yaml:"type"`
+	AgentType   string            `json:"agent_type" yaml:"agent_type"`
+	AgentConfig string            `json:"agent_config,omitempty" yaml:"agent_config,omitempty"`
+	Config      map[string]any    `json:"config,omitempty" yaml:"config,omitempty"`
+	Condition   string            `json:"condition,omitempty" yaml:"condition,omitempty"`
+	Parallel    bool              `json:"parallel,omitempty" yaml:"parallel,omitempty"`
+	MaxRetries  int               `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
+	TimeoutSecs int               `json:"timeout_secs,omitempty" yaml:"timeout_secs,omitempty"`
+	InputMap    map[string]string `json:"input_map,omitempty" yaml:"input_map,omitempty"`
+	OutputMap   map[string]string `json:"output_map,omitempty" yaml:"output_map,omitempty"`
+	RetryPolicy *RetryPolicy      `json:"retry_policy,omitempty" yaml:"retry_policy,omitempty"`
 }
 
 // Connection represents a connection between workflow steps

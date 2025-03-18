@@ -37,7 +37,7 @@ func (h *ActorHandler) UploadPatientData(c *gin.Context) {
 	filename := header.Filename
 	fileExt := strings.ToLower(filepath.Ext(filename))
 
-	var patientData map[string]interface{}
+	var patientData map[string]any
 
 	switch fileExt {
 	case ".json":
@@ -73,8 +73,8 @@ func (h *ActorHandler) UploadPatientData(c *gin.Context) {
 }
 
 // processJSONFile processes a JSON file into patient data
-func processJSONFile(file io.Reader) (map[string]interface{}, error) {
-	var patientData map[string]interface{}
+func processJSONFile(file io.Reader) (map[string]any, error) {
+	var patientData map[string]any
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -99,7 +99,7 @@ func processJSONFile(file io.Reader) (map[string]interface{}, error) {
 }
 
 // processCSVFile processes a CSV file into patient data
-func processCSVFile(file io.Reader) (map[string]interface{}, error) {
+func processCSVFile(file io.Reader) (map[string]any, error) {
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -117,7 +117,7 @@ func processCSVFile(file io.Reader) (map[string]interface{}, error) {
 		return nil, errors.Validation("CSV data row does not match headers", "mismatched_csv")
 	}
 
-	patientData := make(map[string]interface{})
+	patientData := make(map[string]any)
 
 	for i, header := range headers {
 		header = strings.TrimSpace(strings.ToLower(header))

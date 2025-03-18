@@ -6,14 +6,11 @@ import (
 )
 
 // SetupRoutes configures all the routes for the API
-func (s *Server) SetupRoutes(h *handler.ActorHandler) {
-	s.router.Use(middleware.CORS())
-	s.router.Use(middleware.RequestLogger())
-	s.router.Use(middleware.Recovery())
-
-	s.router.GET("/health", h.HealthCheck)
-
+func (s *Server) SetupRoutes(h *handler.ActorHandler, adminH *handler.AdminHandler) {
 	api := s.router.Group("/api")
+	api.Use(middleware.CORS())
+	api.Use(middleware.RequestLogger())
+	api.Use(middleware.Recovery())
 	{
 		api.GET("/demo-cases", h.GetDemoCases)
 		api.POST("/start-case/:case_id", h.StartCase)
@@ -31,7 +28,27 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler) {
 		api.GET("/agents/:agent_id", h.GetAgentDetails)
 
 		api.GET("/messages", h.GetMessages)
+
+		admin := api.Group("/admin")
+		{
+			admin.GET("/agents", adminH.GetAgentConfigs)
+			admin.GET("/agents/:id", adminH.GetAgentConfig)
+			admin.POST("/agents", adminH.CreateAgentConfig)
+			admin.PUT("/agents/:id", adminH.UpdateAgentConfig)
+			admin.POST("/agents/:id/deploy", adminH.DeployAgent)
+
+			admin.GET("/workflows", adminH.GetWorkflows)
+			admin.GET("/workflows/:id", adminH.GetWorkflow)
+			admin.POST("/workflows", adminH.CreateWorkflow)
+			admin.PUT("/workflows/:id", adminH.UpdateWorkflow)
+			admin.DELETE("/workflows/:id", adminH.DeleteWorkflow)
+			admin.GET("/workflows/:id/instances", adminH.GetWorkflowInstances)
+			admin.GET("/workflow-instances/:instance_id", adminH.GetWorkflowInstance)
+			admin.POST("/workflows/:id/instances", adminH.StartWorkflowInstance)
+		}
 	}
 
 	s.router.GET("/ws", h.WebSocketHandler)
+
+	s.router.GET("/health", h.HealthCheck)
 }
