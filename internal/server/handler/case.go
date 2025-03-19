@@ -162,3 +162,36 @@ func (h *ActorHandler) GetResults(c *gin.Context) {
 
 	c.JSON(http.StatusOK, results)
 }
+
+// GetAllCases returns all cases in the system (both demo and regular)
+func (h *ActorHandler) GetAllCases(c *gin.Context) {
+	isDemo := c.Query("demo")
+	filterDemo := isDemo != ""
+	showDemoOnly := isDemo == "true" || isDemo == "1"
+
+	cases, err := h.caseRepository.GetAllCases()
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	if filterDemo && len(cases) > 0 {
+		filteredCases := make(map[string]map[string]any)
+		for id, caseData := range cases {
+			isDemo, ok := caseData["is_demo"].(bool)
+			if !ok {
+				isDemo = false
+			}
+
+			if showDemoOnly == isDemo {
+				filteredCases[id] = caseData
+			}
+		}
+		cases = filteredCases
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cases": cases,
+		"count": len(cases),
+	})
+}

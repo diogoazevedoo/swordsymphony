@@ -99,6 +99,52 @@ func (r *CaseRepository) GetCaseByID(id string) (map[string]any, error) {
 	return caseData, nil
 }
 
+// GetAllCases returns all cases in the system
+func (r *CaseRepository) GetAllCases() (map[string]map[string]any, error) {
+	ctx, cancel := withTimeout(defaultQueryTimeout)
+	defer cancel()
+
+	query := `
+        SELECT id, data, is_demo 
+        FROM cases
+    `
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, errors.External(err, "Failed to query cases", "db_query_error")
+	}
+	defer rows.Close()
+
+	cases := make(map[string]map[string]any)
+	for rows.Next() {
+		var id string
+		var dataJSON []byte
+		var isDemo bool
+
+		if err := rows.Scan(&id, &dataJSON, &isDemo); err != nil {
+			return nil, errors.External(err, "Failed to scan case row", "db_scan_error")
+		}
+
+		var caseData map[string]any
+		if err := json.Unmarshal(dataJSON, &caseData); err != nil {
+			return nil, errors.Internal("Failed to decode case data from JSON", "json_decode_error")
+		}
+
+		caseData["is_demo"] = isDemo
+		cases[id] = caseData
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, errors.External(err, "Error iterating case rows", "db_iteration_error")
+	}
+
+	if len(cases) == 0 {
+		return nil, errors.NotFound("No cases found", "no_cases")
+	}
+
+	return cases, nil
+}
+
 // GetCurrentCase returns the case currently being processed, or nil if none
 func (r *CaseRepository) GetCurrentCase() map[string]any {
 	r.mu.RLock()

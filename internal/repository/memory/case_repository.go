@@ -49,6 +49,21 @@ func (r *CaseRepository) GetCaseByID(id string) (map[string]any, error) {
 	return caseData, nil
 }
 
+// GetAllCases returns all cases in the system
+func (r *CaseRepository) GetAllCases() (map[string]map[string]any, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(r.cases) == 0 {
+		return nil, errors.NotFound("No cases available", "no_cases")
+	}
+
+	result := make(map[string]map[string]any)
+	maps.Copy(result, r.cases)
+
+	return result, nil
+}
+
 // GetCurrentCase returns the case currently being processed, or nil if none
 func (r *CaseRepository) GetCurrentCase() map[string]any {
 	r.mu.RLock()

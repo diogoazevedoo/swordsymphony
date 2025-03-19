@@ -8,6 +8,9 @@ type CaseRepository interface {
 	// GetCaseByID returns a specific case by ID
 	GetCaseByID(id string) (map[string]any, error)
 
+	// GetAllCases returns all cases in the system (both demo and non-demo)
+	GetAllCases() (map[string]map[string]any, error)
+
 	// GetCurrentCase returns the case currently being processes, or nil if none
 	GetCurrentCase() map[string]any
 
