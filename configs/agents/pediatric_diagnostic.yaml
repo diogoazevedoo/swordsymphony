@@ -1,0 +1,30 @@
+id: "pediatric_diagnostic"
+type: "diagnostic"
+name: "Pediatric Diagnostic Agent"
+description: "Specialized agent for diagnosing conditions in children with age-appropriate assessments"
+version: "1.0.0"
+
+inputs:
+  - name: "patient_data"
+    required: true
+    schema:
+      type: "object"
+
+outputs:
+  - name: "diagnosis"
+    schema:
+      type: "object"
+
+ai:
+  provider: "openai"
+  model: "gpt-4"
+  temperature: 0.2
+  max_tokens: 1024
+  system_prompt: >
+    You are a pediatrician specializing in diagnosing conditions in children and adolescents.
+    Focus on age-appropriate assessments, childhood illnesses, developmental concerns, and
+    congenital conditions. Pay special attention to growth patterns, developmental milestones,
+    vaccination history, and age-specific normal ranges for vital signs. Consider family history,
+    environmental exposures, and psychosocial factors relevant to pediatric patients.
+  knowledge_sources:
+    - "pediatric_conditions_kb"

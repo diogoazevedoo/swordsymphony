@@ -25,8 +25,8 @@ type WorkflowDefinition struct {
 	Version       string             `json:"version" yaml:"version"`
 	Steps         []WorkflowStep     `json:"steps" yaml:"steps"`
 	Connections   []Connection       `json:"connections" yaml:"connections"`
-	InputSchema   json.RawMessage    `json:"input_schema,omitempty" yaml:"input_schema,omitempty"`
-	OutputSchema  json.RawMessage    `json:"output_schema,omitempty" yaml:"output_schema,omitempty"`
+	InputSchema   map[string]any     `json:"input_schema,omitempty" yaml:"input_schema,omitempty"`
+	OutputSchema  map[string]any     `json:"output_schema,omitempty" yaml:"output_schema,omitempty"`
 	Variables     []WorkflowVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
 	ErrorHandlers []ErrorHandler     `json:"error_handlers,omitempty" yaml:"error_handlers,omitempty"`
 	Triggers      []Trigger          `json:"triggers,omitempty" yaml:"triggers,omitempty"`

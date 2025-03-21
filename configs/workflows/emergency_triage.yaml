@@ -1,23 +1,28 @@
-id: "standard_diagnostic_workflow"
-name: "Standard Diagnostic and Treatment"
-description: "Default workflow for diagnosis and treatment planning"
+id: "emergency_triage_workflow"
+name: "Emergency Triage Workflow"
+description: "Rapid assessment and treatment workflow for emergency medical conditions"
 version: "1.0.0"
+author: "SwordSymphony Team"
+tags: ["emergency", "triage", "urgent"]
 
 steps:
   - id: "intake"
-    name: "Patient Intake"
+    name: "Rapid Patient Data Intake"
     type: "task"
     agent_type: "intake_agent"
+    timeoutSecs: 60
     
   - id: "diagnosis"
-    name: "Medical Diagnosis"
+    name: "Emergency Triage Assessment"
     type: "task"
-    agent_type: "diagnostic_agent"
+    agent_type: "emergency_diagnostic"
+    timeoutSecs: 120
     
   - id: "treatment"
-    name: "Treatment Planning"
+    name: "Immediate Treatment Planning"
     type: "task"
     agent_type: "treatment_agent"
+    timeoutSecs: 60
 
 connections:
   - from: "intake"
@@ -54,11 +59,15 @@ input_schema:
             type: "string"
         vitals:
           type: "object"
+        triage_level:
+          type: "string"
+          enum: ["immediate", "urgent", "delayed", "minimal"]
       required:
         - "id"
         - "name"
         - "age"
         - "gender"
         - "symptoms"
+        - "vitals"
   required:
     - "patient_data"

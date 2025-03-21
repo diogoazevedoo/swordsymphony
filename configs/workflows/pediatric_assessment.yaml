@@ -1,21 +1,23 @@
-id: "standard_diagnostic_workflow"
-name: "Standard Diagnostic and Treatment"
-description: "Default workflow for diagnosis and treatment planning"
+id: "pediatric_assessment_workflow"
+name: "Pediatric Assessment Workflow"
+description: "Age-appropriate workflow for diagnosing and treating conditions in children"
 version: "1.0.0"
+author: "SwordSymphony Team"
+tags: ["pediatric", "children", "development"]
 
 steps:
   - id: "intake"
-    name: "Patient Intake"
+    name: "Pediatric Patient Data Intake"
     type: "task"
     agent_type: "intake_agent"
     
   - id: "diagnosis"
-    name: "Medical Diagnosis"
+    name: "Pediatric Specialist Diagnosis"
     type: "task"
-    agent_type: "diagnostic_agent"
+    agent_type: "pediatric_diagnostic"
     
   - id: "treatment"
-    name: "Treatment Planning"
+    name: "Pediatric Treatment Planning"
     type: "task"
     agent_type: "treatment_agent"
 
@@ -53,6 +55,10 @@ input_schema:
           items:
             type: "string"
         vitals:
+          type: "object"
+        growth_metrics:
+          type: "object"
+        developmental_milestones:
           type: "object"
       required:
         - "id"

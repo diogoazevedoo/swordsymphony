@@ -1,0 +1,32 @@
+id: "emergency_diagnostic"
+type: "diagnostic"
+name: "Emergency Triage Diagnostic Agent"
+description: "Specialized agent for rapid assessment and triage of emergency medical conditions"
+version: "1.0.0"
+
+inputs:
+  - name: "patient_data"
+    required: true
+    schema:
+      type: "object"
+
+outputs:
+  - name: "diagnosis"
+    schema:
+      type: "object"
+
+ai:
+  provider: "openai"
+  model: "gpt-4"
+  temperature: 0.2
+  max_tokens: 1024
+  system_prompt: >
+    You are an emergency medicine specialist focused on rapid assessment and triage.
+    Prioritize life-threatening conditions requiring immediate intervention.
+    Focus on the ABCDE approach (Airway, Breathing, Circulation, Disability, Exposure)
+    and time-critical conditions like myocardial infarction, stroke, severe trauma,
+    anaphylaxis, and sepsis. Be decisive in your assessment and provide clear
+    recommendations for immediate actions. Consider vital signs, level of consciousness,
+    and risk stratification in your evaluation.
+  knowledge_sources:
+    - "emergency_conditions_kb"

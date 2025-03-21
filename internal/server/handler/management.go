@@ -11,15 +11,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// AdminHandler contains handlers for administrative functions
-type AdminHandler struct {
+// ManagementHandler contains handlers for administrative functions
+type ManagementHandler struct {
 	agentService    *config.AgentConfigService
 	workflowService *workflow.WorkflowService
 }
 
-// NewAdminHandler creates a new admin handler
-func NewAdminHandler(agentService *config.AgentConfigService, workflowService *workflow.WorkflowService) *AdminHandler {
-	return &AdminHandler{
+// NewManagementHandler creates a new admin handler
+func NewManagementHandler(agentService *config.AgentConfigService, workflowService *workflow.WorkflowService) *ManagementHandler {
+	return &ManagementHandler{
 		agentService:    agentService,
 		workflowService: workflowService,
 	}
@@ -28,7 +28,7 @@ func NewAdminHandler(agentService *config.AgentConfigService, workflowService *w
 // --- Agent Configuration Endpoints ---
 
 // GetAgentConfigs returns all agent configurations
-func (h *AdminHandler) GetAgentConfigs(c *gin.Context) {
+func (h *ManagementHandler) GetAgentConfigs(c *gin.Context) {
 	configs := h.agentService.GetAllAgentConfigs()
 
 	simplifiedConfigs := make([]map[string]any, 0, len(configs))
@@ -50,7 +50,7 @@ func (h *AdminHandler) GetAgentConfigs(c *gin.Context) {
 }
 
 // GetAgentConfig returns details of a specific agent configuration
-func (h *AdminHandler) GetAgentConfig(c *gin.Context) {
+func (h *ManagementHandler) GetAgentConfig(c *gin.Context) {
 	configID := c.Param("id")
 
 	config, exists := h.agentService.GetAgentConfig(configID)
@@ -63,7 +63,7 @@ func (h *AdminHandler) GetAgentConfig(c *gin.Context) {
 }
 
 // CreateAgentConfig creates a new agent configuration
-func (h *AdminHandler) CreateAgentConfig(c *gin.Context) {
+func (h *ManagementHandler) CreateAgentConfig(c *gin.Context) {
 	var config config.AgentConfig
 
 	if err := c.ShouldBindJSON(&config); err != nil {
@@ -93,7 +93,7 @@ func (h *AdminHandler) CreateAgentConfig(c *gin.Context) {
 }
 
 // UpdateAgentConfig updates an existing agent configuration
-func (h *AdminHandler) UpdateAgentConfig(c *gin.Context) {
+func (h *ManagementHandler) UpdateAgentConfig(c *gin.Context) {
 	configID := c.Param("id")
 
 	if _, exists := h.agentService.GetAgentConfig(configID); !exists {
@@ -124,7 +124,7 @@ func (h *AdminHandler) UpdateAgentConfig(c *gin.Context) {
 }
 
 // DeployAgent creates and registers an agent from a configuration
-func (h *AdminHandler) DeployAgent(c *gin.Context) {
+func (h *ManagementHandler) DeployAgent(c *gin.Context) {
 	configID := c.Param("id")
 
 	if _, exists := h.agentService.GetAgentConfig(configID); !exists {
@@ -148,7 +148,7 @@ func (h *AdminHandler) DeployAgent(c *gin.Context) {
 // --- Workflow Management Endpoints ---
 
 // GetWorkflows returns all workflow definitions
-func (h *AdminHandler) GetWorkflows(c *gin.Context) {
+func (h *ManagementHandler) GetWorkflows(c *gin.Context) {
 	workflows := h.workflowService.GetAllWorkflowDefinitions()
 
 	simplifiedWorkflows := make([]map[string]any, 0, len(workflows))
@@ -171,7 +171,7 @@ func (h *AdminHandler) GetWorkflows(c *gin.Context) {
 }
 
 // GetWorkflow returns details of a specific workflow
-func (h *AdminHandler) GetWorkflow(c *gin.Context) {
+func (h *ManagementHandler) GetWorkflow(c *gin.Context) {
 	workflowID := c.Param("id")
 
 	workflow, exists := h.workflowService.GetWorkflowDefinition(workflowID)
@@ -184,7 +184,7 @@ func (h *AdminHandler) GetWorkflow(c *gin.Context) {
 }
 
 // CreateWorkflow creates a new workflow
-func (h *AdminHandler) CreateWorkflow(c *gin.Context) {
+func (h *ManagementHandler) CreateWorkflow(c *gin.Context) {
 	var workflow workflow.WorkflowDefinition
 
 	if err := c.ShouldBindJSON(&workflow); err != nil {
@@ -214,7 +214,7 @@ func (h *AdminHandler) CreateWorkflow(c *gin.Context) {
 }
 
 // UpdateWorkflow updates an existing workflow
-func (h *AdminHandler) UpdateWorkflow(c *gin.Context) {
+func (h *ManagementHandler) UpdateWorkflow(c *gin.Context) {
 	workflowID := c.Param("id")
 
 	if _, exists := h.workflowService.GetWorkflowDefinition(workflowID); !exists {
@@ -245,7 +245,7 @@ func (h *AdminHandler) UpdateWorkflow(c *gin.Context) {
 }
 
 // DeleteWorkflow deletes a workflow
-func (h *AdminHandler) DeleteWorkflow(c *gin.Context) {
+func (h *ManagementHandler) DeleteWorkflow(c *gin.Context) {
 	workflowID := c.Param("id")
 
 	if err := h.workflowService.DeleteWorkflowDefinition(workflowID); err != nil {
@@ -260,7 +260,7 @@ func (h *AdminHandler) DeleteWorkflow(c *gin.Context) {
 }
 
 // GetWorkflowInstances returns all instances of a workflow
-func (h *AdminHandler) GetWorkflowInstances(c *gin.Context) {
+func (h *ManagementHandler) GetWorkflowInstances(c *gin.Context) {
 	workflowID := c.Param("id")
 
 	instances, err := h.workflowService.GetWorkflowInstances(workflowID)
@@ -289,7 +289,7 @@ func (h *AdminHandler) GetWorkflowInstances(c *gin.Context) {
 }
 
 // GetWorkflowInstance returns details of a specific workflow instance
-func (h *AdminHandler) GetWorkflowInstance(c *gin.Context) {
+func (h *ManagementHandler) GetWorkflowInstance(c *gin.Context) {
 	instanceIDStr := c.Param("instance_id")
 
 	instanceID, err := uuid.Parse(instanceIDStr)
@@ -308,7 +308,7 @@ func (h *AdminHandler) GetWorkflowInstance(c *gin.Context) {
 }
 
 // StartWorkflowInstance creates and starts a new workflow instance
-func (h *AdminHandler) StartWorkflowInstance(c *gin.Context) {
+func (h *ManagementHandler) StartWorkflowInstance(c *gin.Context) {
 	workflowID := c.Param("id")
 
 	if _, exists := h.workflowService.GetWorkflowDefinition(workflowID); !exists {

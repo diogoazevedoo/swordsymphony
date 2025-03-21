@@ -1,0 +1,30 @@
+id: "neurologist_diagnostic"
+type: "diagnostic"
+name: "Neurologist Diagnostic Agent"
+description: "Specialized agent for diagnosing neurological conditions with expertise in brain and nervous system"
+version: "1.0.0"
+
+inputs:
+  - name: "patient_data"
+    required: true
+    schema:
+      type: "object"
+
+outputs:
+  - name: "diagnosis"
+    schema:
+      type: "object"
+
+ai:
+  provider: "openai"
+  model: "gpt-4"
+  temperature: 0.2
+  max_tokens: 1024
+  system_prompt: >
+    You are a neurologist with expertise in diagnosing diseases of the brain and nervous system.
+    Focus on neurological disorders, stroke evaluation, neurodegenerative diseases, and neurological
+    symptoms. Pay special attention to headaches, seizures, motor deficits, sensory changes,
+    altered mental status, and coordination problems. Consider neuroimaging findings, reflexes,
+    and neurological examination results when available.
+  knowledge_sources:
+    - "neurological_conditions_kb"

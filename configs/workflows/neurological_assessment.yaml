@@ -1,18 +1,20 @@
-id: "standard_diagnostic_workflow"
-name: "Standard Diagnostic and Treatment"
-description: "Default workflow for diagnosis and treatment planning"
+id: "neurological_assessment_workflow"
+name: "Neurological Assessment Workflow"
+description: "Specialized workflow for diagnosing and treating neurological conditions"
 version: "1.0.0"
+author: "SwordSymphony Team"
+tags: ["neurology", "brain", "nervous system", "specialist"]
 
 steps:
   - id: "intake"
-    name: "Patient Intake"
+    name: "Patient Data Intake"
     type: "task"
     agent_type: "intake_agent"
     
   - id: "diagnosis"
-    name: "Medical Diagnosis"
+    name: "Neurological Specialist Diagnosis"
     type: "task"
-    agent_type: "diagnostic_agent"
+    agent_type: "neurologist_diagnostic"
     
   - id: "treatment"
     name: "Treatment Planning"
@@ -53,6 +55,8 @@ input_schema:
           items:
             type: "string"
         vitals:
+          type: "object"
+        neurological_tests:
           type: "object"
       required:
         - "id"

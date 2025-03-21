@@ -113,7 +113,7 @@ func (a *Application) initServer() error {
 		a.workflowEngine,
 	)
 
-	adminH := handler.NewAdminHandler(
+	adminH := handler.NewManagementHandler(
 		a.agentConfigService,
 		a.workflowService,
 	)
