@@ -13,6 +13,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
+	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
@@ -103,27 +104,29 @@ type Connection struct {
 
 // WorkflowInstance represents a running instance of a workflow
 type WorkflowInstance struct {
-	ID             uuid.UUID      `json:"id"`
-	WorkflowID     string         `json:"workflow_id"`
-	Status         string         `json:"status"`
-	CurrentSteps   []string       `json:"current_steps"`
-	CompletedSteps []string       `json:"completed_steps"`
-	StepResults    map[string]any `json:"step_results"`
-	Input          map[string]any `json:"input"`
-	Output         map[string]any `json:"output"`
-	Errors         []string       `json:"errors"`
-	TaskID         uuid.UUID      `json:"task_id"`
-	ThreadID       uuid.UUID      `json:"thread_id"`
-	StartTime      int64          `json:"start_time"`
-	EndTime        int64          `json:"end_time"`
+	ID             uuid.UUID          `json:"id"`
+	WorkflowID     string             `json:"workflow_id"`
+	Status         string             `json:"status"`
+	CurrentSteps   []string           `json:"current_steps"`
+	CompletedSteps []string           `json:"completed_steps"`
+	StepResults    map[string]any     `json:"step_results"`
+	Input          map[string]any     `json:"input"`
+	Output         map[string]any     `json:"output"`
+	Errors         []string           `json:"errors"`
+	TaskID         uuid.UUID          `json:"task_id"`
+	ThreadID       uuid.UUID          `json:"thread_id"`
+	StartTime      int64              `json:"start_time"`
+	EndTime        int64              `json:"end_time"`
+	cancelFunc     context.CancelFunc `json:"-"`
 }
 
 // WorkflowEngine manages workflow definitions and instances
 type WorkflowEngine struct {
-	definitions     map[string]WorkflowDefinition
-	instances       map[uuid.UUID]*WorkflowInstance
-	orchestratorRef any
-	mu              sync.RWMutex
+	definitions      map[string]WorkflowDefinition
+	instances        map[uuid.UUID]*WorkflowInstance
+	orchestratorRef  any
+	resultRepository repository.ResultRepository
+	mu               sync.RWMutex
 }
 
 // NewWorkflowEngine creates a new workflow engine
@@ -210,13 +213,50 @@ func (e *WorkflowEngine) StartWorkflow(ctx context.Context, workflowID string, i
 		StartTime:      time.Now().UnixNano(),
 	}
 
+	workflowCtx := context.Background()
+	var cancel context.CancelFunc
+
+	timeoutSecs := getWorkflowTimeout(workflow)
+	if timeoutSecs > 0 {
+		workflowCtx, cancel = context.WithTimeout(workflowCtx, time.Duration(timeoutSecs)*time.Second)
+	} else {
+		workflowCtx, cancel = context.WithTimeout(workflowCtx, time.Hour)
+	}
+
+	instance.cancelFunc = cancel
+
 	e.mu.Lock()
 	e.instances[instance.ID] = instance
 	e.mu.Unlock()
 
-	go e.executeWorkflow(ctx, instance)
+	go e.executeWorkflow(workflowCtx, instance)
 
 	return instance, nil
+}
+
+func (e *WorkflowEngine) TerminateWorkflow(instanceID uuid.UUID) error {
+	e.mu.RLock()
+	instance, exists := e.instances[instanceID]
+	e.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("workflow instance %s not found", instanceID)
+	}
+
+	if instance.cancelFunc != nil {
+		instance.cancelFunc()
+	}
+
+	return nil
+}
+
+func getWorkflowTimeout(workflow WorkflowDefinition) int {
+	if val, ok := workflow.Metadata["timeout_secs"]; ok {
+		if timeout, ok := val.(int); ok {
+			return timeout
+		}
+	}
+	return 0
 }
 
 // GetWorkflowInstance retrieves a workflow instance by ID
@@ -688,6 +728,19 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 		}
 	}
 
+	var patientData map[string]any
+	var caseID string
+
+	if pd, ok := inputData["patient_data"].(map[string]any); ok {
+		patientData = pd
+
+		if caseIdVal, ok := patientData["case_id"].(string); ok && caseIdVal != "" {
+			caseID = caseIdVal
+		} else if idVal, ok := patientData["id"].(string); ok && idVal != "" {
+			caseID = idVal
+		}
+	}
+
 	inputWithStepInfo := map[string]any{
 		"patient_data":     inputData,
 		"workflow_step_id": step.ID,
@@ -713,7 +766,34 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 		"agent_type": step.AgentType,
 	}
 
+	time.Sleep(2 * time.Second)
+
+	if caseID != "" && e.resultRepository != nil {
+		results, err := e.resultRepository.GetResultsByCaseID(caseID)
+		if err == nil && results != nil {
+			for k, v := range results {
+				taskResult[k] = v
+			}
+
+			state.mutex.Lock()
+			if state.instance.StepResults == nil {
+				state.instance.StepResults = make(map[string]any)
+			}
+
+			if step.AgentType == "diagnostic_agent" && results["diagnosis"] != nil {
+				state.instance.StepResults["diagnosis"] = results["diagnosis"]
+			} else if step.AgentType == "treatment_agent" && results["treatment_plan"] != nil {
+				state.instance.StepResults["treatment_plan"] = results["treatment_plan"]
+			}
+			state.mutex.Unlock()
+		}
+	}
+
 	return taskResult, nil
+}
+
+func (e *WorkflowEngine) SetResultRepository(repo repository.ResultRepository) {
+	e.resultRepository = repo
 }
 
 // executeConditionStep runs a condition step in the workflow

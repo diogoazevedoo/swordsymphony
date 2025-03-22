@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
@@ -78,7 +79,7 @@ func (h *ActorHandler) StartWorkflow(c *gin.Context) {
 
 	logger.Info("Starting workflow", "workflow_id", workflowID, "case_id", caseID)
 
-	instance, err := workflowEngine.StartWorkflow(c.Request.Context(), workflowID, map[string]any{
+	instance, err := workflowEngine.StartWorkflow(context.Background(), workflowID, map[string]any{
 		"patient_data": caseData,
 	})
 

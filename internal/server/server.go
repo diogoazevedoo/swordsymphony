@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
+	"github.com/diogoazevedoo/swordsymphony/internal/server/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -40,6 +41,7 @@ func NewServer(addr string) *Server {
 // NewServerWithOptions creates a new http server with custom options
 func NewServerWithOptions(addr string, options ServerOptions) *Server {
 	router := gin.Default()
+	router.Use(middleware.CORS())
 
 	return &Server{
 		router: router,

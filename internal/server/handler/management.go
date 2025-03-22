@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/config"
@@ -322,7 +323,7 @@ func (h *ManagementHandler) StartWorkflowInstance(c *gin.Context) {
 		return
 	}
 
-	instance, err := h.workflowService.StartWorkflow(c.Request.Context(), workflowID, input)
+	instance, err := h.workflowService.StartWorkflow(context.Background(), workflowID, input)
 	if err != nil {
 		response.Error(c, errors.Wrap(err, errors.ErrorTypeInternal, "Failed to start workflow", "start_workflow_failed"))
 		return

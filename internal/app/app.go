@@ -96,6 +96,7 @@ func (a *Application) initActorSystem() error {
 	orchestrator, exists := a.actorSystem.GetActor(orchestratorAddr)
 	if exists {
 		a.workflowEngine.SetOrchestrator(orchestrator)
+		a.workflowEngine.SetResultRepository(a.container.ResultRepo)
 	}
 
 	return nil

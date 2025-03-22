@@ -152,6 +152,19 @@ func (o *OrchestratorActor) GetAllMessages(threadID uuid.UUID) []domain.Message 
 	return []domain.Message{}
 }
 
+// GetAllSystemMessages returns all messages for the orchestrator
+func (o *OrchestratorActor) GetAllSystemMessages() []domain.Message {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	messages := make([]domain.Message, 0, len(o.activeThreads))
+	for _, thread := range o.activeThreads {
+		messages = append(messages, thread.Messages...)
+	}
+
+	return messages
+}
+
 // GetAgentStatus returns the status of all agents
 func (o *OrchestratorActor) GetAgentStatus() map[string]domain.AgentStatus {
 	actors := o.System.GetAllActors()
