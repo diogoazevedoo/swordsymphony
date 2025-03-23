@@ -13,6 +13,7 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 	api.Use(middleware.Recovery())
 	{
 		api.GET("/cases", h.GetAllCases)
+		api.GET("/cases/:case_id", h.GetCaseByID)
 		api.GET("/demo-cases", h.GetDemoCases)
 		api.POST("/start-case/:case_id", h.StartCase)
 		api.GET("/case-status", h.GetCaseStatus)

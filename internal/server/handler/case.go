@@ -196,3 +196,16 @@ func (h *ActorHandler) GetAllCases(c *gin.Context) {
 		"count": len(cases),
 	})
 }
+
+// GetCaseByID returns a specific case by ID
+func (h *ActorHandler) GetCaseByID(c *gin.Context) {
+	caseID := c.Param("case_id")
+
+	caseData, err := h.caseRepository.GetCaseByID(caseID)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, caseData)
+}
