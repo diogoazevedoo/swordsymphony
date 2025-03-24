@@ -105,6 +105,7 @@ func (o *OrchestratorActor) StartTask(taskDetails map[string]any) domain.TaskInf
 		StartTime:      time.Now(),
 		Messages:       []domain.Message{},
 		AgentsInvolved: make(map[string]bool),
+		AgentStatus:    make(map[string]domain.AgentStatus),
 	}
 
 	o.mu.Lock()
@@ -112,6 +113,7 @@ func (o *OrchestratorActor) StartTask(taskDetails map[string]any) domain.TaskInf
 	o.mu.Unlock()
 
 	thread.AgentsInvolved[string(domain.IntakeAgentType)] = true
+	thread.AgentStatus[string(domain.IntakeAgentType)] = domain.AgentBusy
 
 	taskMsg := domain.NewMessage(
 		string(o.Address()),
@@ -257,7 +259,20 @@ func (o *OrchestratorActor) handleTaskCompletion(ctx context.Context, msg domain
 		return fmt.Errorf("no thread found for task %s", taskID)
 	}
 
+	if thread.AgentStatus == nil {
+		thread.AgentStatus = make(map[string]domain.AgentStatus)
+	}
+
+	thread.AgentStatus[msg.Sender] = domain.AgentComplete
+
 	allComplete := true
+	for agent := range thread.AgentsInvolved {
+		status, exists := thread.AgentStatus[agent]
+		if !exists || status != domain.AgentComplete {
+			allComplete = false
+			break
+		}
+	}
 
 	if allComplete {
 		logger.Info("All agents completed task",
@@ -311,4 +326,10 @@ func (o *OrchestratorActor) storeMessage(msg domain.Message) {
 			thread.AgentsInvolved[msg.Recipient] = true
 		}
 	}
+}
+
+// AgentExists checks if an agent is registered in the actor system
+func (o *OrchestratorActor) AgentExists(address actor.Address) bool {
+	_, exists := o.System.GetActor(address)
+	return exists
 }

@@ -80,6 +80,33 @@ func (a *Application) initActorSystem() error {
 		return fmt.Errorf("failed to register standard agents: %w", err)
 	}
 
+	for _, agentType := range []domain.AgentType{
+		domain.IntakeAgentType,
+		domain.DiagnosticAgentType,
+		domain.TreatmentAgentType,
+	} {
+		actorConfig := actor.ActorConfig{
+			ID:          string(agentType),
+			Type:        string(agentType),
+			Name:        domain.GetAgentName(agentType),
+			Description: fmt.Sprintf("%s for processing medical data", domain.GetAgentName(agentType)),
+			Properties:  map[string]any{},
+		}
+
+		agent, err := a.actorRegistry.Create(ctx, actorConfig, a.actorSystem)
+		if err != nil {
+			logger.Error("Failed to create agent", "agent", string(agentType), "error", err)
+			continue
+		}
+
+		if err := a.actorSystem.Register(agent); err != nil {
+			logger.Error("Failed to register agent", "agent", string(agentType), "error", err)
+			continue
+		}
+
+		logger.Info("Successfully registered agent", "agent", string(agentType))
+	}
+
 	if err := actorAgent.CreateSystemActors(ctx, a.actorRegistry, a.actorSystem); err != nil {
 		return fmt.Errorf("failed to create system actors: %w", err)
 	}
@@ -97,6 +124,12 @@ func (a *Application) initActorSystem() error {
 	if exists {
 		a.workflowEngine.SetOrchestrator(orchestrator)
 		a.workflowEngine.SetResultRepository(a.container.ResultRepo)
+	}
+
+	logger.Info("Listing all registered actors")
+	actors := a.actorSystem.GetAllActors()
+	for addr := range actors {
+		logger.Info("Registered actor", "address", addr)
 	}
 
 	return nil

@@ -54,12 +54,13 @@ func NewMessage(
 
 // TaskThread represents the conversation thread for a specific task
 type TaskThread struct {
-	TaskID         uuid.UUID       `json:"task_id"`
-	ThreadID       uuid.UUID       `json:"thread_id"`
-	Status         string          `json:"status"`
-	StartTime      time.Time       `json:"start_time"`
-	Messages       []Message       `json:"messages"`
-	AgentsInvolved map[string]bool `json:"agents_involved"`
+	TaskID         uuid.UUID              `json:"task_id"`
+	ThreadID       uuid.UUID              `json:"thread_id"`
+	Status         string                 `json:"status"`
+	StartTime      time.Time              `json:"start_time"`
+	Messages       []Message              `json:"messages"`
+	AgentsInvolved map[string]bool        `json:"agents_involved"`
+	AgentStatus    map[string]AgentStatus `json:"agent_status"`
 }
 
 // TaskInfo represents the output of StartTask

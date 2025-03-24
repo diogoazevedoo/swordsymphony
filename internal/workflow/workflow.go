@@ -10,6 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"maps"
+
+	"github.com/diogoazevedoo/swordsymphony/internal/actor"
+	"github.com/diogoazevedoo/swordsymphony/internal/domain"
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	orchestratorActor "github.com/diogoazevedoo/swordsymphony/internal/orchestrator/actor"
@@ -711,10 +715,16 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 		return nil, fmt.Errorf("orchestrator reference is not valid")
 	}
 
-	inputData := make(map[string]any)
-	for k, v := range state.instance.Input {
-		inputData[k] = v
+	agentExists := orchestrator.AgentExists(actor.Address(step.AgentType))
+	if !agentExists {
+		logger.Error("Agent not found in actor system",
+			"agent_type", step.AgentType,
+			"step_id", step.ID)
+		return nil, fmt.Errorf("agent %s not found in actor system", step.AgentType)
 	}
+
+	inputData := make(map[string]any)
+	maps.Copy(inputData, state.instance.Input)
 
 	for stepID, results := range state.stepResults {
 		stepKey := fmt.Sprintf("step.%s", stepID)
@@ -758,38 +768,34 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 	}
 	state.mutex.Unlock()
 
-	taskResult := map[string]any{
-		"task_id":    taskInfo.TaskID.String(),
-		"thread_id":  taskInfo.ThreadID.String(),
-		"status":     "completed",
-		"step_id":    step.ID,
-		"agent_type": step.AgentType,
+	resultChan := make(chan map[string]any, 1)
+	errorChan := make(chan error, 1)
+
+	timeoutDuration := 5 * time.Minute
+	if step.TimeoutSecs > 0 {
+		timeoutDuration = time.Duration(step.TimeoutSecs) * time.Second
 	}
 
-	time.Sleep(2 * time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
+	defer cancel()
 
-	if caseID != "" && e.resultRepository != nil {
-		results, err := e.resultRepository.GetResultsByCaseID(caseID)
-		if err == nil && results != nil {
-			for k, v := range results {
-				taskResult[k] = v
-			}
+	msgChan := orchestrator.Subscribe()
 
-			state.mutex.Lock()
-			if state.instance.StepResults == nil {
-				state.instance.StepResults = make(map[string]any)
-			}
+	go pollForResults(timeoutCtx, caseID, e.resultRepository, taskInfo, step, resultChan, errorChan)
 
-			if step.AgentType == "diagnostic_agent" && results["diagnosis"] != nil {
-				state.instance.StepResults["diagnosis"] = results["diagnosis"]
-			} else if step.AgentType == "treatment_agent" && results["treatment_plan"] != nil {
-				state.instance.StepResults["treatment_plan"] = results["treatment_plan"]
-			}
-			state.mutex.Unlock()
-		}
+	go monitorCompletionMessages(timeoutCtx, msgChan, taskInfo, caseID, e.resultRepository, step, resultChan)
+
+	select {
+	case result := <-resultChan:
+		orchestrator.Unsubscribe(msgChan)
+		return result, nil
+	case err := <-errorChan:
+		orchestrator.Unsubscribe(msgChan)
+		return nil, err
+	case <-timeoutCtx.Done():
+		orchestrator.Unsubscribe(msgChan)
+		return nil, fmt.Errorf("timeout waiting for step %s to complete", step.ID)
 	}
-
-	return taskResult, nil
 }
 
 func (e *WorkflowEngine) SetResultRepository(repo repository.ResultRepository) {
@@ -873,4 +879,113 @@ func (e *WorkflowEngine) GetWorkflow(workflowID string) (WorkflowDefinition, err
 	}
 
 	return workflow, nil
+}
+
+// pollForResults polls for task results and sends them to the result channel
+func pollForResults(ctx context.Context, caseID string, repo repository.ResultRepository,
+	taskInfo domain.TaskInfo, step *WorkflowStep,
+	resultChan chan<- map[string]any, errorChan chan<- error) {
+	backoff := 2 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			if caseID != "" && repo != nil {
+				if results, err := repo.GetResultsByCaseID(caseID); err == nil && results != nil {
+					if isResultRelevantForStep(results, step) {
+						resultChan <- buildTaskResultFromDBResults(results, taskInfo, step)
+						return
+					}
+				}
+			}
+
+			backoff = time.Duration(float64(backoff) * 1.5)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// monitorCompletionMessages monitors completion messages for a task
+func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Message,
+	taskInfo domain.TaskInfo, caseID string,
+	repo repository.ResultRepository, step *WorkflowStep,
+	resultChan chan<- map[string]any) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-msgChan:
+			if msg.MessageType == domain.TaskComplete {
+				taskIDStr, ok := msg.Content["task_id"].(string)
+				if ok && taskIDStr == taskInfo.TaskID.String() {
+					if caseID != "" && repo != nil {
+						if results, err := repo.GetResultsByCaseID(caseID); err == nil && results != nil {
+							resultChan <- buildTaskResultFromDBResults(results, taskInfo, step)
+							return
+						}
+					}
+
+					resultChan <- map[string]any{
+						"task_id":    taskInfo.TaskID.String(),
+						"thread_id":  taskInfo.ThreadID.String(),
+						"status":     "completed",
+						"step_id":    step.ID,
+						"agent_type": step.AgentType,
+					}
+					return
+				}
+			}
+		}
+	}
+}
+
+// isResultRelevantForStep checks if the task results are relevant for the current step
+func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
+	if step.AgentType == "diagnostic_agent" || strings.Contains(step.AgentType, "diagnostic") {
+		_, hasDiagnosis := results["diagnosis"]
+		return hasDiagnosis
+	}
+
+	if step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment") {
+		_, hasTreatment := results["treatment_plan"]
+		return hasTreatment
+	}
+
+	return len(results) > 0
+}
+
+// buildTaskResultFromDBResults builds a task result from results in the database
+func buildTaskResultFromDBResults(dbResults map[string]any, taskInfo domain.TaskInfo, step *WorkflowStep) map[string]any {
+	result := map[string]any{
+		"task_id":    taskInfo.TaskID.String(),
+		"thread_id":  taskInfo.ThreadID.String(),
+		"status":     "completed",
+		"step_id":    step.ID,
+		"agent_type": step.AgentType,
+	}
+
+	if step.AgentType == "diagnostic_agent" || strings.Contains(step.AgentType, "diagnostic") {
+		if diagnosis, ok := dbResults["diagnosis"]; ok {
+			result["diagnosis"] = diagnosis
+		}
+	}
+
+	if step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment") {
+		if treatment, ok := dbResults["treatment_plan"]; ok {
+			result["treatment_plan"] = treatment
+		}
+	}
+
+	for k, v := range dbResults {
+		if _, exists := result[k]; !exists {
+			result[k] = v
+		}
+	}
+
+	return result
 }

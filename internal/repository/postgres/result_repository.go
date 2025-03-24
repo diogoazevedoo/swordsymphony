@@ -1,10 +1,14 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
+	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 )
 
 // ResultRepository is a PostgreSQL implementation of the ResultRepository interface
@@ -29,44 +33,35 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		return errors.Validation("Results cannot be nil", "nil_results")
 	}
 
-	ctx, cancel := withTimeout(defaultQueryTimeout)
-	defer cancel()
+	maxRetries := 3
+	backoffDuration := 200 * time.Millisecond
 
-	resultsJSON, err := json.Marshal(results)
-	if err != nil {
-		return errors.Internal("Failed to encode results to JSON", "json_encode_error")
-	}
+	var lastErr error
 
-	var existingID int
-	checkQuery := `SELECT id FROM results WHERE case_id = $1`
-	err = r.db.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID)
-
-	if err == nil {
-		updateQuery := `
-            UPDATE results
-            SET data = $1, updated_at = NOW()
-            WHERE case_id = $2
-        `
-		_, err = r.db.ExecContext(ctx, updateQuery, resultsJSON, caseID)
-		if err != nil {
-			return errors.External(err, "Failed to update results", "db_update_error")
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoffDuration)
+			backoffDuration *= 2
 		}
-		return nil
-	}
 
-	if err == sql.ErrNoRows {
-		insertQuery := `
-            INSERT INTO results (case_id, data, created_at, updated_at)
-            VALUES ($1, $2, NOW(), NOW())
-        `
-		_, err = r.db.ExecContext(ctx, insertQuery, caseID, resultsJSON)
-		if err != nil {
-			return errors.External(err, "Failed to insert results", "db_insert_error")
+		err := r.storeResultsWithTransaction(caseID, results)
+		if err == nil {
+			return nil
 		}
-		return nil
+
+		lastErr = err
+		logger.Warn("Error storing results, will retry",
+			"error", err,
+			"attempt", attempt+1,
+			"max_retries", maxRetries)
+
+		// Only retry on transient errors
+		if !isTransientDatabaseError(err) {
+			return err
+		}
 	}
 
-	return errors.External(err, "Failed to check existing results", "db_check_error")
+	return lastErr
 }
 
 // GetResultsByCaseID retrieves results for a specific case
@@ -136,4 +131,70 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 	}
 
 	return results, nil
+}
+
+// storeResultsWithTransaction stores results for a case within a transaction
+func (r *ResultRepository) storeResultsWithTransaction(caseID string, results map[string]any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+	})
+	if err != nil {
+		return errors.External(err, "Failed to begin transaction", "db_transaction_error")
+	}
+	defer tx.Rollback()
+
+	resultsJSON, err := json.Marshal(results)
+	if err != nil {
+		return errors.Internal("Failed to encode results to JSON", "json_encode_error")
+	}
+
+	var existingID int
+	checkQuery := `SELECT id FROM results WHERE case_id = $1`
+	err = tx.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID)
+
+	if err == nil {
+		updateQuery := `
+            UPDATE results
+            SET data = $1, updated_at = NOW()
+            WHERE case_id = $2
+        `
+		_, err = tx.ExecContext(ctx, updateQuery, resultsJSON, caseID)
+		if err != nil {
+			return errors.External(err, "Failed to update results", "db_update_error")
+		}
+	} else if err == sql.ErrNoRows {
+		insertQuery := `
+            INSERT INTO results (case_id, data, created_at, updated_at)
+            VALUES ($1, $2, NOW(), NOW())
+        `
+		_, err = tx.ExecContext(ctx, insertQuery, resultsJSON, caseID)
+		if err != nil {
+			return errors.External(err, "Failed to insert results", "db_insert_error")
+		}
+	} else {
+		return errors.External(err, "Failed to check existing results", "db_check_error")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return errors.External(err, "Failed to commit transaction", "db_commit_error")
+	}
+
+	return nil
+}
+
+// isTransientDatabaseError checks if an error is a transient database error
+func isTransientDatabaseError(err error) bool {
+	if appErr, ok := err.(*errors.AppError); ok {
+		if appErr.Type == errors.ErrorTypeExternal {
+			errMsg := strings.ToLower(appErr.Error())
+			return strings.Contains(errMsg, "deadlock") ||
+				strings.Contains(errMsg, "connection") ||
+				strings.Contains(errMsg, "timeout") ||
+				strings.Contains(errMsg, "lock")
+		}
+	}
+	return false
 }
