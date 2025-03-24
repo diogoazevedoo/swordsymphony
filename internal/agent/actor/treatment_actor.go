@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/actor"
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
@@ -241,7 +242,38 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 
 	a.status = domain.AgentComplete
 
+	if a.resultRepository != nil {
+		caseID := ""
+		if patientData != nil {
+			if caseIdentifier, ok := patientData["case_id"].(string); ok && caseIdentifier != "" {
+				caseID = caseIdentifier
+			} else if id, ok := patientData["id"].(string); ok && id != "" {
+				caseID = id
+			}
+		}
+
+		if caseID != "" {
+			results := map[string]any{
+				"diagnosis":      diagnosis,
+				"treatment_plan": treatmentPlan,
+				"timestamp":      time.Now().Format(time.RFC3339),
+				"workflow_step":  "treatment",
+				"agent_type":     "treatment_agent",
+			}
+
+			if err := a.resultRepository.StoreResults(caseID, results); err != nil {
+				logger.Error("Failed to store treatment results",
+					"case_id", caseID,
+					"error", err)
+			} else {
+				logger.Info("Successfully stored treatment results",
+					"case_id", caseID)
+			}
+		}
+	}
+
 	return nil
+
 }
 
 // createTreatmentPlan develops a personalized treatment plan using AI

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 )
 
 // ResultRepository is an in-memory implementation of the ResultRepository interface
@@ -32,8 +33,31 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.results[caseID] = results
+	existingResults, exists := r.results[caseID]
+	if !exists {
+		existingResults = make(map[string]any)
+	}
+
+	for k, v := range results {
+		existingResults[k] = v
+	}
+
+	r.results[caseID] = existingResults
+
+	logger.Info("Stored results in memory repository",
+		"case_id", caseID,
+		"result_count", len(existingResults),
+		"result_keys", getMapKeys(existingResults))
+
 	return nil
+}
+
+func getMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // GetResultsByCaseID retrieves results for a specific case

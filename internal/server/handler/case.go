@@ -209,3 +209,36 @@ func (h *ActorHandler) GetCaseByID(c *gin.Context) {
 
 	c.JSON(http.StatusOK, caseData)
 }
+
+// DebugResultRepository provides information about the result repository
+func (h *ActorHandler) DebugResultRepository(c *gin.Context) {
+	caseID := c.Param("case_id")
+	if caseID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Case ID is required",
+		})
+		return
+	}
+
+	results, err := h.resultRepository.GetResultsByCaseID(caseID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"case_id": caseID,
+			"error":   err.Error(),
+			"status":  "error",
+		})
+		return
+	}
+
+	resultKeys := make([]string, 0, len(results))
+	for k := range results {
+		resultKeys = append(resultKeys, k)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"case_id":     caseID,
+		"status":      "success",
+		"result_keys": resultKeys,
+		"results":     results,
+	})
+}

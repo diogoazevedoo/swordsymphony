@@ -170,11 +170,29 @@ func (s *WorkflowService) GetWorkflowInstance(instanceID uuid.UUID) (*WorkflowIn
 // GetWorkflowInstances returns all instances of a specific workflow
 func (s *WorkflowService) GetWorkflowInstances(workflowID string) ([]*WorkflowInstance, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	instances, exists := s.instancesByWorkflowID[workflowID]
-	if !exists {
-		return []*WorkflowInstance{}, nil
+	s.mu.RUnlock()
+
+	if !exists || len(instances) == 0 {
+		allInstances := s.engine.GetAllInstances()
+		filteredInstances := make([]*WorkflowInstance, 0)
+
+		for _, instance := range allInstances {
+			if instance.WorkflowID == workflowID {
+				filteredInstances = append(filteredInstances, instance)
+
+				s.mu.Lock()
+				if _, exists := s.instancesByWorkflowID[workflowID]; !exists {
+					s.instancesByWorkflowID[workflowID] = make([]*WorkflowInstance, 0)
+				}
+				s.instancesByWorkflowID[workflowID] = append(s.instancesByWorkflowID[workflowID], instance)
+				s.mu.Unlock()
+			}
+		}
+
+		if len(filteredInstances) > 0 {
+			return filteredInstances, nil
+		}
 	}
 
 	return instances, nil

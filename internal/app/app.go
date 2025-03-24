@@ -97,6 +97,8 @@ func (a *Application) initActorSystem() error {
 			Properties:  map[string]any{},
 		}
 
+		actorConfig.Properties["result_repository"] = a.container.ResultRepo
+
 		agent, err := a.actorRegistry.Create(ctx, actorConfig, a.actorSystem)
 		if err != nil {
 			logger.Error("Failed to create agent", "agent", string(agentType), "error", err)

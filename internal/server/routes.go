@@ -18,6 +18,7 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 		api.POST("/start-case/:case_id", h.StartCase)
 		api.GET("/case-status", h.GetCaseStatus)
 		api.GET("/results/:case_id", h.GetResults)
+		api.GET("/debug/repository/:case_id", h.DebugResultRepository)
 
 		api.POST("/upload", h.UploadPatientData)
 
