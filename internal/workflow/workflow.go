@@ -385,12 +385,19 @@ func (e *WorkflowEngine) completeWorkflow(instance *WorkflowInstance, status str
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	oldStatus := instance.Status
 	instance.Status = status
 	instance.EndTime = time.Now().UnixNano()
 
 	if errorMsg != "" && !contains(instance.Errors, errorMsg) {
 		instance.Errors = append(instance.Errors, errorMsg)
 	}
+
+	logger.Info("Workflow status changed",
+		"instance_id", instance.ID,
+		"old_status", oldStatus,
+		"new_status", status,
+		"has_errors", len(instance.Errors) > 0)
 }
 
 // Helper function to check if a string slice contains a value
@@ -614,7 +621,7 @@ func (s *WorkflowState) CollectOutputs() map[string]any {
 
 // executeStep runs a single step in the workflow
 func (e *WorkflowEngine) executeStep(ctx context.Context, state *WorkflowState, step *WorkflowStep) {
-	logger.Info("Executing workflow step",
+	logger.Info("Starting workflow step execution",
 		"step_id", step.ID,
 		"step_name", step.Name,
 		"agent_type", step.AgentType)
@@ -664,6 +671,10 @@ func (e *WorkflowEngine) executeStep(ctx context.Context, state *WorkflowState, 
 			"error": err.Error(),
 		})
 		return
+	} else {
+		logger.Info("Step execution completed successfully",
+			"step_id", step.ID,
+			"has_results", results != nil)
 	}
 
 	state.MarkStepComplete(step.ID, "completed", results)

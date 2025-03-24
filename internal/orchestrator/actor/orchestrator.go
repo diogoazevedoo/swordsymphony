@@ -237,12 +237,14 @@ func (o *OrchestratorActor) handleStatusUpdate(ctx context.Context, msg domain.M
 func (o *OrchestratorActor) handleTaskCompletion(ctx context.Context, msg domain.Message) error {
 	taskID, ok := msg.Content["task_id"].(string)
 	if !ok {
+		logger.Error("Task completion message missing task_id")
 		return fmt.Errorf("task completion message missing task_id")
 	}
 
 	logger.Info("Task completion message received",
 		"task_id", taskID,
-		"sender", msg.Sender)
+		"sender", msg.Sender,
+		"content_keys", mapKeys(msg.Content))
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -332,4 +334,12 @@ func (o *OrchestratorActor) storeMessage(msg domain.Message) {
 func (o *OrchestratorActor) AgentExists(address actor.Address) bool {
 	_, exists := o.System.GetActor(address)
 	return exists
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

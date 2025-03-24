@@ -80,6 +80,10 @@ func (a *Application) initActorSystem() error {
 		return fmt.Errorf("failed to register standard agents: %w", err)
 	}
 
+	if err := actorAgent.CreateSystemActors(ctx, a.actorRegistry, a.actorSystem); err != nil {
+		return fmt.Errorf("failed to create system actors: %w", err)
+	}
+
 	for _, agentType := range []domain.AgentType{
 		domain.IntakeAgentType,
 		domain.DiagnosticAgentType,
@@ -105,10 +109,6 @@ func (a *Application) initActorSystem() error {
 		}
 
 		logger.Info("Successfully registered agent", "agent", string(agentType))
-	}
-
-	if err := actorAgent.CreateSystemActors(ctx, a.actorRegistry, a.actorSystem); err != nil {
-		return fmt.Errorf("failed to create system actors: %w", err)
 	}
 
 	if err := a.agentConfigService.Initialize(); err != nil {

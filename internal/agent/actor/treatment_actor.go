@@ -280,6 +280,11 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 		prompt += "\n\n" + interactionInfo
 	}
 
+	prompt = "IMPORTANT: Your response MUST be a valid JSON object in the following format:\n" + prompt
+
+	logger.Info("Patient data for diagnosis", "data", patientData)
+	logger.Info("Sending diagnostic prompt to AI", "prompt_length", len(prompt))
+
 	aiResponse, err := a.aiClient.GenerateCompletion(ctx, prompt, ai.CompletionOptions{
 		MaxTokens:    1024,
 		Temperature:  0.3,
@@ -288,13 +293,16 @@ func (a *TreatmentActor) createTreatmentPlan(ctx context.Context, patientData, d
 	})
 
 	if err != nil {
-		logger.Error("AI treatment plan generation failed", "error", err)
-		return map[string]any{
-			"recommendations": []string{"Error in treatment planning process", "Please consult with a healthcare provider"},
-			"warnings":        []string{"Treatment plan could not be generated due to AI service error: " + err.Error()},
-			"follow_up":       []string{"Schedule appointment with primary care physician or specialist"},
-		}
+		logger.Error("AI generation failed",
+			"error", err,
+			"step", "treatment",
+			"agent", string(a.Address()))
 	}
+
+	logger.Info("Received AI response",
+		"response_length", len(aiResponse.Text),
+		"step", "treatment",
+		"agent", string(a.Address()))
 
 	var aiTreatment map[string]any
 

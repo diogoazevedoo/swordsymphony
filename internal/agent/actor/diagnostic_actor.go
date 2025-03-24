@@ -254,6 +254,11 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 		}
 	}
 
+	prompt = "IMPORTANT: Your response MUST be a valid JSON object in the following format:\n" + prompt
+
+	logger.Info("Patient data for diagnosis", "data", patientData)
+	logger.Info("Sending diagnostic prompt to AI", "prompt_length", len(prompt))
+
 	aiResponse, err := a.aiClient.GenerateCompletion(ctx, prompt, ai.CompletionOptions{
 		MaxTokens:    1024,
 		Temperature:  0.3,
@@ -262,14 +267,16 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 	})
 
 	if err != nil {
-		logger.Error("AI diagnostic generation failed", "error", err)
-		return map[string]any{
-			"potential_diagnoses": []string{"Error in diagnostic process"},
-			"reasoning":           []string{"Unable to complete diagnosis due to AI service error: " + err.Error()},
-			"recommended_tests":   []string{"Please consult with a healthcare provider"},
-			"confidence":          0.0,
-		}
+		logger.Error("AI generation failed",
+			"error", err,
+			"step", "diagnosis",
+			"agent", string(a.Address()))
 	}
+
+	logger.Info("Received AI response",
+		"response_length", len(aiResponse.Text),
+		"step", "diagnosis",
+		"agent", string(a.Address()))
 
 	var aiDiagnosis map[string]any
 
@@ -424,10 +431,23 @@ func extractJSON(text string) string {
 	jsonEnd := strings.LastIndex(text, "}")
 
 	if jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart {
-		return text
+		return createFallbackJSON(text)
 	}
 
 	return text[jsonStart : jsonEnd+1]
+}
+
+func createFallbackJSON(text string) string {
+	fallback := map[string]interface{}{
+		"error":       "AI did not return valid JSON",
+		"ai_response": text,
+	}
+
+	if jsonBytes, err := json.Marshal(fallback); err == nil {
+		return string(jsonBytes)
+	}
+
+	return "{\"error\":\"Failed to parse AI response\",\"ai_response\":\"See logs for details\"}"
 }
 
 func validateAndNormalizeDiagnosticResponse(diagnosis map[string]any) {
