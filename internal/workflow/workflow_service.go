@@ -157,11 +157,45 @@ func (s *WorkflowService) StartWorkflow(ctx context.Context, workflowID string, 
 // GetWorkflowInstance retrieves a workflow instance by ID
 func (s *WorkflowService) GetWorkflowInstance(instanceID uuid.UUID) (*WorkflowInstance, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	instance, exists := s.instances[instanceID]
+	s.mu.RUnlock()
+
 	if !exists {
-		return nil, fmt.Errorf("workflow instance %s not found", instanceID)
+		// Try getting from engine directly
+		engineInstance, err := s.engine.GetWorkflowInstance(instanceID)
+		if err != nil {
+			return nil, fmt.Errorf("workflow instance %s not found: %w", instanceID, err)
+		}
+
+		// Check if status should be marked as completed based on steps
+		if (engineInstance.EndTime > 0 && len(engineInstance.CompletedSteps) > 0) ||
+			(engineInstance.Output != nil && len(engineInstance.Output) > 0) {
+			engineInstance.Status = "completed"
+		}
+
+		// Ensure engine instance is registered locally
+		s.mu.Lock()
+		s.instances[instanceID] = engineInstance
+
+		if _, exists := s.instancesByWorkflowID[engineInstance.WorkflowID]; !exists {
+			s.instancesByWorkflowID[engineInstance.WorkflowID] = make([]*WorkflowInstance, 0)
+		}
+		s.instancesByWorkflowID[engineInstance.WorkflowID] = append(s.instancesByWorkflowID[engineInstance.WorkflowID], engineInstance)
+		s.mu.Unlock()
+
+		return engineInstance, nil
+	}
+
+	// Check if we need to ensure completion status is synchronized
+	if (instance.EndTime > 0 && instance.Status != "completed" && len(instance.CompletedSteps) > 0) ||
+		(instance.Output != nil && len(instance.Output) > 0 && instance.Status != "completed") {
+		s.mu.Lock()
+		instance.Status = "completed"
+		s.mu.Unlock()
+
+		logger.Info("Updated instance status to completed",
+			"instance_id", instance.ID,
+			"workflow_id", instance.WorkflowID)
 	}
 
 	return instance, nil

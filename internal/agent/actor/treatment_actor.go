@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -166,26 +165,54 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 
 	a.SetState("current_treatment_plan", treatmentPlan)
 
-	resultRepo := a.resultRepository
-	if resultRepo != nil {
+	// Get the case ID from the patient data
+	caseID := a.extractCaseID(patientData)
+
+	// Log the extracted case ID
+	logger.Info("Extracted case ID for treatment storage",
+		"case_id", caseID,
+		"method", "direct extraction")
+
+	// Store the results
+	if a.resultRepository != nil && caseID != "" {
 		results := map[string]any{
 			"diagnosis":      diagnosis,
 			"treatment_plan": treatmentPlan,
+			"timestamp":      time.Now().Format(time.RFC3339),
+			"workflow_step":  "treatment",
+			"agent_type":     "treatment_agent",
 		}
 
-		caseID := ""
-		if patientData != nil {
-			if caseIdentifier, ok := patientData["case_id"].(string); ok && caseIdentifier != "" {
-				caseID = caseIdentifier
-			} else if id, ok := patientData["id"].(string); ok && id != "" {
-				caseID = id
+		// Attempt to store the results
+		err := a.resultRepository.StoreResults(caseID, results)
+		if err != nil {
+			logger.Error("Failed to store treatment results",
+				"case_id", caseID,
+				"error", err)
+		} else {
+			logger.Info("Successfully stored treatment results in repository",
+				"case_id", caseID,
+				"result_keys", getMapKeys(results))
+
+			// Verify that results were stored by attempting to retrieve them
+			verifyResults, verifyErr := a.resultRepository.GetResultsByCaseID(caseID)
+			if verifyErr != nil {
+				logger.Error("Failed to verify result storage - cannot retrieve results",
+					"case_id", caseID,
+					"error", verifyErr)
+			} else {
+				logger.Info("Verified result storage - results retrieved successfully",
+					"case_id", caseID,
+					"result_keys", getMapKeys(verifyResults))
 			}
 		}
-
-		if caseID != "" {
-			if err := resultRepo.StoreResults(caseID, results); err != nil {
-				log.Printf("Failed to store results: %v", err)
-			}
+	} else {
+		if a.resultRepository == nil {
+			logger.Error("Cannot store treatment results - result repository is nil")
+		}
+		if caseID == "" {
+			logger.Error("Cannot store treatment results - case ID is empty",
+				"patient_data_keys", getMapKeys(patientData))
 		}
 	}
 
@@ -241,36 +268,6 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 	}
 
 	a.status = domain.AgentComplete
-
-	if a.resultRepository != nil {
-		caseID := ""
-		if patientData != nil {
-			if caseIdentifier, ok := patientData["case_id"].(string); ok && caseIdentifier != "" {
-				caseID = caseIdentifier
-			} else if id, ok := patientData["id"].(string); ok && id != "" {
-				caseID = id
-			}
-		}
-
-		if caseID != "" {
-			results := map[string]any{
-				"diagnosis":      diagnosis,
-				"treatment_plan": treatmentPlan,
-				"timestamp":      time.Now().Format(time.RFC3339),
-				"workflow_step":  "treatment",
-				"agent_type":     "treatment_agent",
-			}
-
-			if err := a.resultRepository.StoreResults(caseID, results); err != nil {
-				logger.Error("Failed to store treatment results",
-					"case_id", caseID,
-					"error", err)
-			} else {
-				logger.Info("Successfully stored treatment results",
-					"case_id", caseID)
-			}
-		}
-	}
 
 	return nil
 
@@ -456,4 +453,55 @@ func validateAndNormalizeTreatmentResponse(treatment map[string]any) {
 	} else if _, ok := treatment["contraindications"].([]any); !ok {
 		treatment["contraindications"] = []string{}
 	}
+}
+
+// extractCaseID ensures consistent case ID extraction across the system
+func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
+	// Try different possible keys and paths for finding the case ID
+	caseIDPaths := [][]string{
+		{"case_id"},         // Direct case_id field
+		{"id"},              // Direct id field
+		{"patient_id"},      // Direct patient_id field
+		{"data", "id"},      // Nested in data.id
+		{"data", "case_id"}, // Nested in data.case_id
+	}
+
+	for _, path := range caseIDPaths {
+		if len(path) == 1 {
+			// Try direct key
+			if idVal, ok := patientData[path[0]].(string); ok && idVal != "" {
+				logger.Info("Found case ID using path", "path", path[0], "value", idVal)
+				return idVal
+			}
+		} else if len(path) == 2 {
+			// Try nested structure
+			if dataMap, ok := patientData[path[0]].(map[string]any); ok {
+				if idVal, ok := dataMap[path[1]].(string); ok && idVal != "" {
+					logger.Info("Found case ID using nested path", "path", path[0]+"."+path[1], "value", idVal)
+					return idVal
+				}
+			}
+		}
+	}
+
+	// If no ID found, try to log the keys available
+	logger.Warn("Could not find case ID in patient data",
+		"available_keys", getMapKeys(patientData))
+
+	// Final fallback: Try JSON marshaling to inspect structure
+	jsonData, err := json.Marshal(patientData)
+	if err == nil {
+		logger.Debug("Patient data JSON structure", "json", string(jsonData))
+	}
+
+	return ""
+}
+
+// getMapKeys returns a list of keys in a map
+func getMapKeys(data map[string]any) []string {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	return keys
 }

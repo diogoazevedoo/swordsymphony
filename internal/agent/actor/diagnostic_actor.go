@@ -355,7 +355,11 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 	}
 
 	if confidence, ok := aiDiagnosis["confidence"].(float64); ok {
-		aiDiagnosis["confidence"] = confidence / 100.0
+		if confidence <= 1.0 {
+			aiDiagnosis["confidence"] = confidence
+		} else {
+			aiDiagnosis["confidence"] = confidence / 100.0
+		}
 	}
 
 	return aiDiagnosis

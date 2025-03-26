@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
@@ -33,35 +32,95 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		return errors.Validation("Results cannot be nil", "nil_results")
 	}
 
-	maxRetries := 3
-	backoffDuration := 200 * time.Millisecond
+	logger.Info("Attempting to store results in PostgreSQL",
+		"case_id", caseID,
+		"result_keys", getMapKeys(results))
 
-	var lastErr error
+	// Start a transaction with elevated isolation level
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			time.Sleep(backoffDuration)
-			backoffDuration *= 2
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+	})
+	if err != nil {
+		logger.Error("Failed to begin transaction", "error", err)
+		return errors.External(err, "Failed to begin transaction", "db_transaction_error")
+	}
+	defer tx.Rollback()
+
+	// Retrieve existing data if any
+	existingDataJSON := []byte("{}")
+	var existingData map[string]any
+
+	var existingID int
+	checkQuery := `SELECT id, data FROM results WHERE case_id = $1`
+	err = tx.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID, &existingDataJSON)
+
+	if err == nil {
+		// We have existing data, parse it
+		if err := json.Unmarshal(existingDataJSON, &existingData); err != nil {
+			logger.Error("Failed to unmarshal existing data", "error", err)
+			existingData = make(map[string]any)
 		}
 
-		err := r.storeResultsWithTransaction(caseID, results)
-		if err == nil {
-			return nil
+		// Merge existing data with new results
+		for k, v := range results {
+			existingData[k] = v
 		}
 
-		lastErr = err
-		logger.Warn("Error storing results, will retry",
-			"error", err,
-			"attempt", attempt+1,
-			"max_retries", maxRetries)
-
-		// Only retry on transient errors
-		if !isTransientDatabaseError(err) {
-			return err
+		// Marshal merged data
+		dataJSON, err := json.Marshal(existingData)
+		if err != nil {
+			logger.Error("Failed to marshal merged data", "error", err)
+			return errors.Internal("Failed to encode results to JSON", "json_encode_error")
 		}
+
+		// Update existing record
+		updateQuery := `
+			UPDATE results
+			SET data = $1, updated_at = NOW()
+			WHERE case_id = $2
+		`
+		_, err = tx.ExecContext(ctx, updateQuery, dataJSON, caseID)
+		if err != nil {
+			logger.Error("Failed to update results", "error", err)
+			return errors.External(err, "Failed to update results", "db_update_error")
+		}
+	} else if err == sql.ErrNoRows {
+		// No existing data, create new record
+		dataJSON, err := json.Marshal(results)
+		if err != nil {
+			logger.Error("Failed to marshal new data", "error", err)
+			return errors.Internal("Failed to encode results to JSON", "json_encode_error")
+		}
+
+		insertQuery := `
+			INSERT INTO results (case_id, data, created_at, updated_at)
+			VALUES ($1, $2, NOW(), NOW())
+		`
+		_, err = tx.ExecContext(ctx, insertQuery, caseID, dataJSON)
+		if err != nil {
+			logger.Error("Failed to insert results", "error", err, "query", insertQuery)
+			return errors.External(err, "Failed to insert results", "db_insert_error")
+		}
+	} else {
+		// Unexpected error when checking for existing data
+		logger.Error("Failed to check for existing data", "error", err)
+		return errors.External(err, "Failed to check existing results", "db_check_error")
 	}
 
-	return lastErr
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		logger.Error("Failed to commit transaction", "error", err)
+		return errors.External(err, "Failed to commit transaction", "db_commit_error")
+	}
+
+	logger.Info("Successfully stored results in PostgreSQL",
+		"case_id", caseID,
+		"result_keys", getMapKeys(results))
+
+	return nil
 }
 
 // GetResultsByCaseID retrieves results for a specific case
@@ -70,9 +129,12 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 		return nil, errors.Validation("Case ID cannot be empty", "empty_case_id")
 	}
 
+	logger.Info("Attempting to retrieve results from PostgreSQL", "case_id", id)
+
 	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
+	// First try direct case_id match
 	query := `
         SELECT data 
         FROM results 
@@ -85,19 +147,25 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 	if err == nil {
 		var results map[string]any
 		if err := json.Unmarshal(dataJSON, &results); err != nil {
+			logger.Error("Failed to unmarshal results data", "error", err)
 			return nil, errors.Internal("Failed to decode results from JSON", "json_decode_error")
 		}
+		logger.Info("Retrieved results directly from PostgreSQL",
+			"case_id", id,
+			"result_keys", getMapKeys(results))
 		return results, nil
 	}
 
 	if err != sql.ErrNoRows {
+		logger.Error("Unexpected error retrieving results", "error", err)
 		return nil, errors.External(err, "Failed to query results", "db_query_error")
 	}
 
+	// If not found by direct case_id, try looking up in cases table first
 	caseQuery := `
         SELECT id, data 
         FROM cases 
-        WHERE data->>'id' = $1
+        WHERE id = $1 OR data->>'id' = $1
     `
 
 	var caseID string
@@ -106,11 +174,14 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
+			logger.Warn("No case found with ID", "case_id", id)
 			return nil, errors.NotFound("No patient or case found with ID", "patient_not_found")
 		}
+		logger.Error("Failed to query case", "error", err)
 		return nil, errors.External(err, "Failed to query case", "db_case_query_error")
 	}
 
+	// Now try to get results using the case's ID from the database
 	resultsQuery := `
         SELECT data 
         FROM results 
@@ -120,15 +191,23 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 	err = r.db.QueryRowContext(ctx, resultsQuery, caseID).Scan(&dataJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			logger.Warn("No results found for case", "case_id", caseID)
 			return nil, errors.NotFound("No results found for case", "results_not_found")
 		}
+		logger.Error("Failed to query results using case ID", "error", err, "case_id", caseID)
 		return nil, errors.External(err, "Failed to query results", "db_results_query_error")
 	}
 
 	var results map[string]any
 	if err := json.Unmarshal(dataJSON, &results); err != nil {
+		logger.Error("Failed to unmarshal results data", "error", err)
 		return nil, errors.Internal("Failed to decode results from JSON", "json_decode_error")
 	}
+
+	logger.Info("Retrieved results via case lookup from PostgreSQL",
+		"requested_id", id,
+		"database_id", caseID,
+		"result_keys", getMapKeys(results))
 
 	return results, nil
 }
@@ -185,16 +264,11 @@ func (r *ResultRepository) storeResultsWithTransaction(caseID string, results ma
 	return nil
 }
 
-// isTransientDatabaseError checks if an error is a transient database error
-func isTransientDatabaseError(err error) bool {
-	if appErr, ok := err.(*errors.AppError); ok {
-		if appErr.Type == errors.ErrorTypeExternal {
-			errMsg := strings.ToLower(appErr.Error())
-			return strings.Contains(errMsg, "deadlock") ||
-				strings.Contains(errMsg, "connection") ||
-				strings.Contains(errMsg, "timeout") ||
-				strings.Contains(errMsg, "lock")
-		}
+// getMapKeys extracts all keys from a map for logging
+func getMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return false
+	return keys
 }
