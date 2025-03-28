@@ -50,6 +50,40 @@ func CreateStandardActors(
 	}
 	logger.Info("Registered treatment actor")
 
+	if err := registry.Register("diagnostic", func(ctx context.Context, config actor.ActorConfig, system actor.ActorSystem) (actor.Actor, error) {
+		logger.Info("Creating custom diagnostic actor", "config", config.ID)
+		baseActor := actor.NewBaseActor(actor.Address(config.ID), config, system)
+
+		var aiConfig map[string]any
+		if props, ok := config.Properties["ai"].(map[string]any); ok {
+			aiConfig = props
+		}
+
+		systemPrompt := ""
+		if aiConfig != nil {
+			if prompt, ok := aiConfig["system_prompt"].(string); ok {
+				systemPrompt = prompt
+			}
+		}
+
+		if repoIface, ok := config.Properties["result_repository"]; ok {
+			if repo, ok := repoIface.(repository.ResultRepository); ok {
+				resultRepo = repo
+			}
+		}
+
+		return &DiagnosticActor{
+			BaseActor:          baseActor,
+			status:             domain.AgentIdle,
+			aiClient:           aiClient,
+			knowledgeBase:      kb,
+			diagnosticTemplate: systemPrompt,
+		}, nil
+	}); err != nil {
+		logger.Error("Failed to register custom diagnostic actor", "error", err)
+		return err
+	}
+
 	logger.Info("Updated registered types", "types", registry.GetTypes())
 
 	return nil

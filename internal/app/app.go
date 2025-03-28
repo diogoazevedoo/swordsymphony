@@ -52,6 +52,8 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 		"./configs/workflows",
 	)
 
+	app.workflowEngine.SetAgentConfigService(app.agentConfigService)
+
 	if err := app.initActorSystem(); err != nil {
 		return nil, fmt.Errorf("failed to initialize actor system: %w", err)
 	}

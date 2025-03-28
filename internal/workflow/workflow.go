@@ -13,6 +13,7 @@ import (
 	"maps"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/actor"
+	"github.com/diogoazevedoo/swordsymphony/internal/config"
 	"github.com/diogoazevedoo/swordsymphony/internal/domain"
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
@@ -126,11 +127,12 @@ type WorkflowInstance struct {
 
 // WorkflowEngine manages workflow definitions and instances
 type WorkflowEngine struct {
-	definitions      map[string]WorkflowDefinition
-	instances        map[uuid.UUID]*WorkflowInstance
-	orchestratorRef  any
-	resultRepository repository.ResultRepository
-	mu               sync.RWMutex
+	definitions        map[string]WorkflowDefinition
+	instances          map[uuid.UUID]*WorkflowInstance
+	orchestratorRef    any
+	resultRepository   repository.ResultRepository
+	agentConfigService *config.AgentConfigService
+	mu                 sync.RWMutex
 }
 
 // NewWorkflowEngine creates a new workflow engine
@@ -204,6 +206,10 @@ func (e *WorkflowEngine) StartWorkflow(ctx context.Context, workflowID string, i
 		return nil, fmt.Errorf("workflow with ID %s not found", workflowID)
 	}
 
+	if err := e.ensureRequiredAgentsExist(workflow); err != nil {
+		return nil, fmt.Errorf("workflow agent requirements not met: %w", err)
+	}
+
 	instance := &WorkflowInstance{
 		ID:             uuid.New(),
 		WorkflowID:     workflow.ID,
@@ -236,22 +242,6 @@ func (e *WorkflowEngine) StartWorkflow(ctx context.Context, workflowID string, i
 	go e.executeWorkflow(workflowCtx, instance)
 
 	return instance, nil
-}
-
-func (e *WorkflowEngine) TerminateWorkflow(instanceID uuid.UUID) error {
-	e.mu.RLock()
-	instance, exists := e.instances[instanceID]
-	e.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("workflow instance %s not found", instanceID)
-	}
-
-	if instance.cancelFunc != nil {
-		instance.cancelFunc()
-	}
-
-	return nil
 }
 
 func getWorkflowTimeout(workflow WorkflowDefinition) int {
@@ -433,16 +423,13 @@ WorkflowComplete:
 		"status", finalStatus)
 
 	if finalStatus == "completed" {
-		// Consolidate the results
 		consolidatedResults := consolidateResults(outputs)
 
-		// Add workflow metadata to results
 		consolidatedResults["workflow_id"] = instance.WorkflowID
 		consolidatedResults["instance_id"] = instance.ID.String()
 		consolidatedResults["completed_at"] = time.Now().Format(time.RFC3339)
 		consolidatedResults["status"] = "completed"
 
-		// Store the consolidated results
 		if e.resultRepository != nil {
 			caseID := extractCaseID(instance.Input)
 			if caseID != "" {
@@ -451,14 +438,12 @@ WorkflowComplete:
 					"instance_id", instance.ID,
 					"result_keys", getMapKeys(consolidatedResults))
 
-				// First attempt with direct case ID
 				err := e.resultRepository.StoreResults(caseID, consolidatedResults)
 				if err != nil {
 					logger.Warn("Failed to store consolidated results with primary key, trying alternatives",
 						"case_id", caseID,
 						"error", err)
 
-					// Try with alternative case ID format
 					altErr := e.resultRepository.StoreResults("case_"+caseID, consolidatedResults)
 					if altErr != nil {
 						logger.Error("All attempts to store consolidated results failed",
@@ -473,7 +458,6 @@ WorkflowComplete:
 			}
 		}
 
-		// Update instance output with all consolidated results
 		e.mu.Lock()
 		for k, v := range consolidatedResults {
 			instance.Output[k] = v
@@ -854,11 +838,9 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 	var patientData map[string]any
 	var caseID string
 
-	// Extract patient data from input
 	if pd, ok := inputData["patient_data"].(map[string]any); ok {
 		patientData = pd
 
-		// Extract case ID using multiple possible paths
 		caseIDPaths := [][]string{
 			{"case_id"},
 			{"id"},
@@ -869,7 +851,6 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 
 		for _, path := range caseIDPaths {
 			if len(path) == 1 {
-				// Try direct key
 				if idVal, ok := patientData[path[0]].(string); ok && idVal != "" {
 					caseID = idVal
 					logger.Info("Found case ID using direct key",
@@ -878,7 +859,6 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 					break
 				}
 			} else if len(path) == 2 {
-				// Try nested structure
 				if dataMap, ok := patientData[path[0]].(map[string]any); ok {
 					if idVal, ok := dataMap[path[1]].(string); ok && idVal != "" {
 						caseID = idVal
@@ -895,10 +875,8 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 			logger.Warn("Could not find case ID in patient data",
 				"available_keys", getMapKeys(patientData))
 		} else {
-			// Ensure the case_id is always present at the top level
 			patientData["case_id"] = caseID
 
-			// Also add it to the inputData
 			inputData["case_id"] = caseID
 		}
 	}
@@ -906,9 +884,9 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 	inputWithStepInfo := map[string]any{
 		"patient_data":     patientData,
 		"workflow_step_id": step.ID,
-		"workflow_step":    step.ID, // Add an alternative key format
+		"workflow_step":    step.ID,
 		"agent_type":       step.AgentType,
-		"case_id":          caseID, // Ensure case_id is included at the top level
+		"case_id":          caseID,
 	}
 
 	state.mutex.Lock()
@@ -941,27 +919,20 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 
 	msgChan := orchestrator.Subscribe()
 
-	// Start polling for results
 	go pollForResults(timeoutCtx, caseID, e.resultRepository, taskInfo, step, resultChan, errorChan)
 
-	// Monitor for completion messages
 	go monitorCompletionMessages(timeoutCtx, msgChan, taskInfo, caseID, e.resultRepository, step, resultChan)
 
-	// Wait for results or timeout
 	select {
 	case result := <-resultChan:
 		orchestrator.Unsubscribe(msgChan)
 
-		// Add workflow step and agent information to results
 		result["workflow_step"] = step.ID
 		result["agent_type"] = step.AgentType
 
-		// If we have results and a case ID, store them directly
 		if caseID != "" && e.resultRepository != nil {
-			// Add metadata to the results
 			result["timestamp"] = time.Now().Format(time.RFC3339)
 
-			// Try to store the results with enhanced logging
 			err := e.resultRepository.StoreResults(caseID, result)
 			if err != nil {
 				logger.Error("Failed to store step results in repository",
@@ -1107,17 +1078,14 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 		case <-time.After(backoff):
 			attempts++
 
-			// Intake agent steps can complete faster since they don't need AI processing
-			// In the pollForResults function where the intake step is handled:
 			if step.AgentType == "intake_agent" && attempts >= 3 {
 				logger.Info("Intake step assumed complete after timeout",
 					"step_id", step.ID)
 
-				// Return a proper result with clearer status
 				resultChan <- map[string]any{
 					"task_id":         taskInfo.TaskID.String(),
 					"thread_id":       taskInfo.ThreadID.String(),
-					"status":          "completed", // This is important!
+					"status":          "completed",
 					"step_id":         step.ID,
 					"agent_type":      step.AgentType,
 					"workflow_step":   "intake",
@@ -1127,7 +1095,6 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 				return
 			}
 
-			// Try to get results from the repository if we have a case ID
 			if caseID != "" && repo != nil {
 				results, err := repo.GetResultsByCaseID(caseID)
 				if err == nil && results != nil {
@@ -1136,7 +1103,6 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 						"step_id", step.ID,
 						"result_keys", getMapKeys(results))
 
-					// Check if these results are relevant for this step
 					if isResultRelevantForStep(results, step) {
 						logger.Info("Results are relevant for step",
 							"step_id", step.ID,
@@ -1159,7 +1125,6 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 				}
 			}
 
-			// Treatment steps can be complex, but we need to prevent indefinite waiting
 			if step.AgentType == "treatment_agent" && attempts >= maxAttempts-2 {
 				logger.Info("Treatment step assumed complete after maximum attempts",
 					"step_id", step.ID)
@@ -1182,7 +1147,6 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 				return
 			}
 
-			// Increase backoff time for next attempt
 			backoff = time.Duration(float64(backoff) * 1.5)
 			if backoff > maxBackoff {
 				backoff = maxBackoff
@@ -1196,7 +1160,6 @@ func pollForResults(ctx context.Context, caseID string, repo repository.ResultRe
 		"agent_type", step.AgentType,
 		"max_attempts", maxAttempts)
 
-	// Return a basic result to prevent workflow from hanging
 	resultChan <- map[string]any{
 		"task_id":       taskInfo.TaskID.String(),
 		"thread_id":     taskInfo.ThreadID.String(),
@@ -1234,14 +1197,12 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 
 		case msg, ok := <-msgChan:
 			if !ok {
-				// Channel was closed
 				logger.Warn("Message channel closed unexpectedly",
 					"case_id", caseID,
 					"step_id", step.ID)
 				return
 			}
 
-			// Look for TaskComplete messages
 			if msg.MessageType == domain.TaskComplete {
 				taskIDStr, ok := msg.Content["task_id"].(string)
 				if ok && taskIDStr == taskInfo.TaskID.String() {
@@ -1250,7 +1211,6 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 						"step_id", step.ID,
 						"agent_type", step.AgentType)
 
-					// Try to get results from repository if we have a case ID
 					if caseID != "" && repo != nil {
 						results, err := repo.GetResultsByCaseID(caseID)
 						if err == nil && results != nil && isResultRelevantForStep(results, step) {
@@ -1264,7 +1224,6 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 						}
 					}
 
-					// Use the message content as fallback result
 					result := map[string]any{
 						"task_id":       taskInfo.TaskID.String(),
 						"thread_id":     taskInfo.ThreadID.String(),
@@ -1275,7 +1234,6 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 						"timestamp":     time.Now().Format(time.RFC3339),
 					}
 
-					// Copy any additional content from the message
 					for k, v := range msg.Content {
 						if k != "task_id" && k != "status" && k != "message" {
 							result[k] = v
@@ -1287,7 +1245,6 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 				}
 			}
 
-			// Look for specific message types relevant to this step
 			if isMessageRelevantForStep(msg, step) {
 				logger.Info("Received relevant domain message",
 					"message_type", msg.MessageType,
@@ -1305,12 +1262,10 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 						"timestamp":     time.Now().Format(time.RFC3339),
 					}
 
-					// Copy content from the message
 					for k, v := range msg.Content {
 						result[k] = v
 					}
 
-					// Store these results if we have a case ID and repository
 					if caseID != "" && repo != nil {
 						err := repo.StoreResults(caseID, result)
 						if err != nil {
@@ -1335,25 +1290,21 @@ func monitorCompletionMessages(ctx context.Context, msgChan <-chan domain.Messag
 
 // isMessageRelevantForStep checks if a message is relevant for a particular workflow step
 func isMessageRelevantForStep(msg domain.Message, step *WorkflowStep) bool {
-	// Treatment agent expects DiagnosisResults message type
 	if (step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment")) &&
 		msg.MessageType == domain.DiagnosisResults {
 		return true
 	}
 
-	// Diagnostic agent produces DiagnosisResults message type
 	if (step.AgentType == "diagnostic_agent" || strings.Contains(step.AgentType, "diagnostic")) &&
 		msg.MessageType == domain.DiagnosisResults {
 		return true
 	}
 
-	// Treatment agent produces TreatmentPlan message type
 	if (step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment")) &&
 		msg.MessageType == domain.TreatmentPlan {
 		return true
 	}
 
-	// For task completion messages that might be relevant
 	if msg.MessageType == domain.TaskComplete {
 		if senderVal, ok := msg.Content["sender"].(string); ok {
 			if senderVal == step.AgentType {
@@ -1372,19 +1323,16 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 		"agent_type", step.AgentType,
 		"result_keys", getMapKeys(results))
 
-	// For intake agent, almost any result is fine
 	if step.AgentType == "intake_agent" {
 		return true
 	}
 
-	// Check if this specific step's results exist
 	stepKey := fmt.Sprintf("step.%s", step.ID)
 	if _, hasStep := results[stepKey]; hasStep {
 		logger.Info("Found results for specific step", "step_key", stepKey)
 		return true
 	}
 
-	// Check if workflow_step field matches
 	if stepVal, hasStep := results["workflow_step"]; hasStep {
 		if stepStr, ok := stepVal.(string); ok && stepStr == step.ID {
 			logger.Info("Found results with matching workflow_step", "step", stepStr)
@@ -1392,7 +1340,6 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 		}
 	}
 
-	// Check if agent_type field matches
 	if agentVal, hasAgent := results["agent_type"]; hasAgent {
 		if agentStr, ok := agentVal.(string); ok && agentStr == step.AgentType {
 			logger.Info("Found results with matching agent_type", "agent", agentStr)
@@ -1400,14 +1347,12 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 		}
 	}
 
-	// For diagnostic agent, look for diagnosis data
 	if step.AgentType == "diagnostic_agent" || strings.Contains(step.AgentType, "diagnostic") {
 		if _, hasDiagnosis := results["diagnosis"]; hasDiagnosis {
 			logger.Info("Found diagnosis results")
 			return true
 		}
 
-		// Check for step-specific diagnosis results
 		if diagStepData, hasStepData := results["step.diagnosis"]; hasStepData {
 			if diagMap, isMap := diagStepData.(map[string]any); isMap {
 				if _, hasDiag := diagMap["diagnosis"]; hasDiag {
@@ -1417,7 +1362,6 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 			}
 		}
 
-		// Look for any key containing "diagnos"
 		for k := range results {
 			if strings.Contains(strings.ToLower(k), "diagnos") {
 				logger.Info("Found key containing 'diagnos'", "key", k)
@@ -1426,14 +1370,12 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 		}
 	}
 
-	// For treatment agent, look for treatment plan data
 	if step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment") {
 		if _, hasTreatment := results["treatment_plan"]; hasTreatment {
 			logger.Info("Found treatment_plan results")
 			return true
 		}
 
-		// Check for step-specific treatment results
 		if treatStepData, hasStepData := results["step.treatment"]; hasStepData {
 			if treatMap, isMap := treatStepData.(map[string]any); isMap {
 				if _, hasPlan := treatMap["treatment_plan"]; hasPlan {
@@ -1443,7 +1385,6 @@ func isResultRelevantForStep(results map[string]any, step *WorkflowStep) bool {
 			}
 		}
 
-		// Look for any key containing "treatment" or "recommendations"
 		for k := range results {
 			if strings.Contains(strings.ToLower(k), "treatment") ||
 				strings.Contains(strings.ToLower(k), "recommendations") {
@@ -1468,9 +1409,7 @@ func buildTaskResultFromDBResults(dbResults map[string]any, taskInfo domain.Task
 		"timestamp":     time.Now().Format(time.RFC3339),
 	}
 
-	// Add step-specific data based on agent type
 	if step.AgentType == "diagnostic_agent" || strings.Contains(step.AgentType, "diagnostic") {
-		// Try different paths for diagnosis data
 		if diagnosis, ok := dbResults["diagnosis"]; ok {
 			result["diagnosis"] = diagnosis
 		} else if stepData, ok := dbResults["step.diagnosis"]; ok {
@@ -1483,7 +1422,6 @@ func buildTaskResultFromDBResults(dbResults map[string]any, taskInfo domain.Task
 	}
 
 	if step.AgentType == "treatment_agent" || strings.Contains(step.AgentType, "treatment") {
-		// Try different paths for treatment plan data
 		if treatment, ok := dbResults["treatment_plan"]; ok {
 			result["treatment_plan"] = treatment
 		} else if stepData, ok := dbResults["step.treatment"]; ok {
@@ -1495,16 +1433,13 @@ func buildTaskResultFromDBResults(dbResults map[string]any, taskInfo domain.Task
 		}
 	}
 
-	// Copy all other result data that might be relevant
 	for k, v := range dbResults {
 		if _, exists := result[k]; !exists && !strings.HasPrefix(k, "step.") {
 			result[k] = v
 		}
 	}
 
-	// Ensure required data is present for this step
 	if step.AgentType == "diagnostic_agent" && result["diagnosis"] == nil {
-		// Create fallback diagnosis data
 		result["diagnosis"] = map[string]any{
 			"potential_diagnoses": []string{"Unknown - data retrieval issue"},
 			"confidence":          0.5,
@@ -1516,7 +1451,6 @@ func buildTaskResultFromDBResults(dbResults map[string]any, taskInfo domain.Task
 	}
 
 	if step.AgentType == "treatment_agent" && result["treatment_plan"] == nil {
-		// Create fallback treatment plan data
 		result["treatment_plan"] = map[string]any{
 			"recommendations": []string{
 				"Treatment plan generation successful but data retrieval incomplete",
@@ -1647,28 +1581,24 @@ func extractCaseID(input map[string]any) string {
 func consolidateResults(outputs map[string]any) map[string]any {
 	results := make(map[string]any)
 
-	// Extract and normalize key result data from the outputs
 	for stepKey, stepValue := range outputs {
 		stepMap, ok := stepValue.(map[string]any)
 		if !ok {
 			continue
 		}
 
-		// Look for diagnosis data
 		if strings.Contains(stepKey, "diagnosis") {
 			if diagData, exists := stepMap["diagnosis"]; exists {
 				results["diagnosis"] = diagData
 			}
 		}
 
-		// Look for treatment data
 		if strings.Contains(stepKey, "treatment") {
 			if treatmentData, exists := stepMap["treatment_plan"]; exists {
 				results["treatment_plan"] = treatmentData
 			}
 		}
 
-		// Look for direct diagnosis/treatment keys
 		for dataKey, dataValue := range stepMap {
 			if dataKey == "diagnosis" {
 				results["diagnosis"] = dataValue
@@ -1690,4 +1620,68 @@ func remove(slice []string, value string) []string {
 		}
 	}
 	return result
+}
+
+// SetAgentConfigService sets the agent config service reference
+func (e *WorkflowEngine) SetAgentConfigService(service *config.AgentConfigService) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.agentConfigService = service
+}
+
+// ensureRequiredAgentsExist checks if all agents needed by a workflow exist
+func (e *WorkflowEngine) ensureRequiredAgentsExist(workflowDef WorkflowDefinition) error {
+	if e.orchestratorRef == nil {
+		return fmt.Errorf("orchestrator not set")
+	}
+
+	orchestrator, ok := e.orchestratorRef.(*orchestratorActor.OrchestratorActor)
+	if !ok {
+		return fmt.Errorf("orchestrator reference is not valid")
+	}
+
+	requiredAgents := make(map[string]bool)
+	for _, step := range workflowDef.Steps {
+		if step.AgentType != "" {
+			requiredAgents[step.AgentType] = true
+		}
+	}
+
+	missingAgents := []string{}
+	for agentType := range requiredAgents {
+		if !orchestrator.AgentExists(actor.Address(agentType)) {
+			missingAgents = append(missingAgents, agentType)
+		}
+	}
+
+	if len(missingAgents) > 0 && e.agentConfigService != nil {
+		logger.Info("Found missing agents required by workflow",
+			"workflow", workflowDef.ID,
+			"missing_agents", missingAgents)
+
+		for _, agentType := range missingAgents {
+			_, err := e.agentConfigService.CreateAndRegisterAgent(context.Background(), agentType)
+			if err != nil {
+				logger.Error("Failed to create required agent",
+					"agent_type", agentType,
+					"error", err)
+				return fmt.Errorf("required agent %s could not be created: %w", agentType, err)
+			} else {
+				logger.Info("Created missing agent for workflow",
+					"agent_type", agentType,
+					"workflow", workflowDef.ID)
+			}
+		}
+
+		for _, agentType := range missingAgents {
+			if !orchestrator.AgentExists(actor.Address(agentType)) {
+				return fmt.Errorf("agent %s still missing after attempted creation", agentType)
+			}
+		}
+	} else if len(missingAgents) > 0 {
+		return fmt.Errorf("workflow requires agents that don't exist: %v", missingAgents)
+	}
+
+	return nil
 }

@@ -51,6 +51,23 @@ func (s *AgentConfigService) Initialize() error {
 		logger.Warn("Failed to load prompt templates", "error", err)
 	}
 
+	if err := s.RegisterAgentTypes(); err != nil {
+		logger.Warn("Failed to register agent types", "error", err)
+	}
+
+	for id, _ := range s.configs {
+		agentAddr := actor.Address(id)
+		if _, exists := s.actorSystem.GetActor(agentAddr); !exists {
+			if _, err := s.CreateAndRegisterAgent(context.Background(), id); err != nil {
+				logger.Warn("Failed to create agent",
+					"id", id,
+					"error", err)
+			} else {
+				logger.Info("Created agent from configuration", "id", id)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -198,10 +215,30 @@ func (s *AgentConfigService) CreateAndRegisterAgent(ctx context.Context, configI
 	var err error
 
 	if hasCustomCreator {
+		logger.Info("Creating agent using custom creator",
+			"id", configID,
+			"type", config.Type)
 		agent, err = creator(ctx, config, s.actorSystem)
 	} else {
-		actorConfig := config.ToActorConfig()
-		agent, err = s.registry.Create(ctx, actorConfig, s.actorSystem)
+		baseType := getBaseAgentType(config.Type)
+
+		s.mu.RLock()
+		baseCreator, hasBaseCreator := s.customTypes[baseType]
+		s.mu.RUnlock()
+
+		if hasBaseCreator {
+			logger.Info("Creating agent using base type creator",
+				"id", configID,
+				"type", config.Type,
+				"base_type", baseType)
+			agent, err = baseCreator(ctx, config, s.actorSystem)
+		} else {
+			logger.Info("Creating agent using standard registry",
+				"id", configID,
+				"type", config.Type)
+			actorConfig := config.ToActorConfig()
+			agent, err = s.registry.Create(ctx, actorConfig, s.actorSystem)
+		}
 	}
 
 	if err != nil {
@@ -230,6 +267,67 @@ func saveAgentConfigToFile(config AgentConfig, filePath string) error {
 
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write agent config to file: %w", err)
+	}
+
+	return nil
+}
+
+func getBaseAgentType(specializedType string) string {
+	if strings.Contains(specializedType, "diagnostic") ||
+		strings.Contains(specializedType, "cardiologist") ||
+		strings.Contains(specializedType, "neurologist") ||
+		strings.Contains(specializedType, "pediatric") {
+		return "diagnostic_agent"
+	}
+
+	if strings.Contains(specializedType, "treatment") {
+		return "treatment_agent"
+	}
+
+	return specializedType
+}
+
+// RegisterAgentTypes registers any unregistered agent types loaded from configuration
+func (s *AgentConfigService) RegisterAgentTypes() error {
+	s.mu.RLock()
+	registeredTypes := s.registry.GetTypes()
+	s.mu.RUnlock()
+
+	registeredMap := make(map[string]bool)
+	for _, t := range registeredTypes {
+		registeredMap[t] = true
+	}
+
+	for _, config := range s.configs {
+		if registeredMap[config.Type] {
+			continue
+		}
+
+		baseType := getBaseAgentType(config.Type)
+		if !registeredMap[baseType] {
+			logger.Warn("Cannot register agent type, no base type found",
+				"type", config.Type,
+				"base_type", baseType)
+			continue
+		}
+
+		s.mu.RLock()
+		baseCreator, exists := s.customTypes[baseType]
+		s.mu.RUnlock()
+
+		if !exists {
+			logger.Warn("Base type exists but no creator found",
+				"base_type", baseType)
+			continue
+		}
+
+		s.RegisterCustomType(config.Type, func(ctx context.Context, cfg AgentConfig, system actor.ActorSystem) (actor.Actor, error) {
+			return baseCreator(ctx, cfg, system)
+		})
+
+		logger.Info("Registered custom agent type",
+			"type", config.Type,
+			"based_on", baseType)
 	}
 
 	return nil
