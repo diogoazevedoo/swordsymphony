@@ -1,0 +1,530 @@
+package call
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/diogoazevedoo/swordsymphony/internal/communication/deepgram"
+	"github.com/diogoazevedoo/swordsymphony/internal/communication/elevenlabs"
+	"github.com/diogoazevedoo/swordsymphony/internal/communication/email"
+	"github.com/diogoazevedoo/swordsymphony/internal/communication/twilio"
+	"github.com/diogoazevedoo/swordsymphony/internal/conversation"
+	"github.com/diogoazevedoo/swordsymphony/internal/logger"
+	"github.com/diogoazevedoo/swordsymphony/internal/repository"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// Service coordinates phone calls, speech recognition, AI responses, and workflows
+type Service struct {
+	twilioClient            *twilio.Client
+	elevenLabsClient        *elevenlabs.Client
+	deepgramClient          *deepgram.Client
+	emailSender             *email.Sender
+	conversationManager     *conversation.ConversationManager
+	workflowService         *conversation.WorkflowService
+	resultRepository        repository.ResultRepository
+	webhookHandler          *twilio.WebhookHandler
+	baseURL                 string
+	activeStreamingSessions map[string]StreamingSession
+	mu                      sync.RWMutex
+}
+
+// StreamingSession represents an active audio streaming session
+type StreamingSession struct {
+	CallSID           string
+	ConversationID    string
+	DeepgramStreaming bool
+	IsActive          bool
+	AudioBuffer       []byte
+	LastActivity      time.Time
+	PatientPhone      string
+}
+
+// CallResult contains the results of a completed call
+type CallResult struct {
+	CallSID        string
+	ConversationID string
+	PatientData    map[string]any
+	Diagnosis      map[string]any
+	Treatment      map[string]any
+	WorkflowID     string
+	InstanceID     uuid.UUID
+	EmailSent      bool
+	EmailAddress   string
+	CompletedAt    time.Time
+}
+
+// NewService creates a new call service
+func NewService(
+	twilioClient *twilio.Client,
+	elevenLabsClient *elevenlabs.Client,
+	deepgramClient *deepgram.Client,
+	emailSender *email.Sender,
+	conversationManager *conversation.ConversationManager,
+	workflowService *conversation.WorkflowService,
+	resultRepository repository.ResultRepository,
+	baseURL string,
+) *Service {
+	service := &Service{
+		twilioClient:            twilioClient,
+		elevenLabsClient:        elevenLabsClient,
+		deepgramClient:          deepgramClient,
+		emailSender:             emailSender,
+		conversationManager:     conversationManager,
+		workflowService:         workflowService,
+		resultRepository:        resultRepository,
+		baseURL:                 baseURL,
+		activeStreamingSessions: make(map[string]StreamingSession),
+		webhookHandler:          twilio.NewWebhookHandler(),
+	}
+
+	// Register webhook handlers
+	service.registerWebhookHandlers()
+
+	return service
+}
+
+// GetWebhookHandler returns the Twilio webhook handler
+func (s *Service) GetWebhookHandler() *twilio.WebhookHandler {
+	return s.webhookHandler
+}
+
+// InitiateCall starts a phone call to a patient
+func (s *Service) InitiateCall(patientPhone string) (string, error) {
+	// Create a callback URL for Twilio to use
+	callbackURL := fmt.Sprintf("%s/api/call/webhook", s.baseURL)
+
+	// Start the call
+	callEvent, err := s.twilioClient.MakeCall(patientPhone, callbackURL)
+	if err != nil {
+		logger.Error("Failed to initiate call", "error", err, "phone", patientPhone)
+		return "", fmt.Errorf("failed to initiate call: %w", err)
+	}
+
+	// Create a new conversation for this call
+	conversation, err := s.conversationManager.StartConversation(patientPhone)
+	if err != nil {
+		logger.Error("Failed to create conversation", "error", err, "call_sid", callEvent.CallSID)
+		return "", fmt.Errorf("failed to create conversation: %w", err)
+	}
+
+	// Create a new streaming session
+	s.mu.Lock()
+	s.activeStreamingSessions[callEvent.CallSID] = StreamingSession{
+		CallSID:        callEvent.CallSID,
+		ConversationID: conversation.ID,
+		IsActive:       true,
+		LastActivity:   time.Now(),
+		PatientPhone:   patientPhone,
+	}
+	s.mu.Unlock()
+
+	logger.Info("Call initiated",
+		"call_sid", callEvent.CallSID,
+		"conversation_id", conversation.ID,
+		"patient_phone", patientPhone)
+
+	return callEvent.CallSID, nil
+}
+
+// EndCall terminates an active call
+func (s *Service) EndCall(callSID string) error {
+	s.mu.Lock()
+	session, exists := s.activeStreamingSessions[callSID]
+	if !exists {
+		s.mu.Unlock()
+		return fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	session.IsActive = false
+	s.activeStreamingSessions[callSID] = session
+	s.mu.Unlock()
+
+	// Try to stop the Deepgram streaming if it's active
+	if session.DeepgramStreaming {
+		if err := s.deepgramClient.StopStreamingSession(); err != nil {
+			logger.Warn("Error stopping Deepgram streaming session", "error", err)
+		}
+	}
+
+	// Mark the conversation as complete
+	if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
+		logger.Warn("Error completing conversation", "error", err, "conversation_id", session.ConversationID)
+	}
+
+	// End the Twilio call
+	if err := s.twilioClient.EndCall(callSID); err != nil {
+		logger.Error("Failed to end call", "error", err, "call_sid", callSID)
+		return fmt.Errorf("failed to end call: %w", err)
+	}
+
+	logger.Info("Call ended", "call_sid", callSID)
+	return nil
+}
+
+// ProcessCallResults processes the results of a completed call
+func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("no session found for call %s", callSID)
+	}
+
+	// Process the conversation data
+	processedData, err := s.conversationManager.ProcessConversationData(session.ConversationID)
+	if err != nil {
+		logger.Error("Failed to process conversation data", "error", err, "conversation_id", session.ConversationID)
+		return nil, fmt.Errorf("failed to process conversation data: %w", err)
+	}
+
+	// Get patient data
+	patientData, ok := processedData["patient_data"].(map[string]any)
+	if !ok {
+		logger.Error("Invalid patient data format", "conversation_id", session.ConversationID)
+		return nil, fmt.Errorf("invalid patient data format")
+	}
+
+	// Log the patient data
+	logger.Info("Processed patient data",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
+		"data_keys", getMapKeys(patientData))
+
+	// Select the appropriate workflow
+	workflowID, err := s.workflowService.SelectWorkflow(patientData)
+	if err != nil {
+		logger.Error("Failed to select workflow", "error", err)
+		workflowID = "standard_diagnostic_workflow" // Fallback to standard workflow
+	}
+
+	// Run the workflow
+	instance, err := s.workflowService.RunWorkflow(context.Background(), workflowID, patientData)
+	if err != nil {
+		logger.Error("Failed to run workflow", "error", err, "workflow_id", workflowID)
+		return nil, fmt.Errorf("failed to run workflow: %w", err)
+	}
+
+	// Wait for workflow to complete (with timeout)
+	results, err := s.workflowService.WaitForWorkflow(context.Background(), instance.ID, 120) // 2 minute timeout
+	if err != nil {
+		logger.Error("Error waiting for workflow completion", "error", err, "instance_id", instance.ID)
+		// Continue anyway, we might still have partial results
+	}
+
+	// Extract diagnosis and treatment data
+	diagnosisData := make(map[string]any)
+	treatmentData := make(map[string]any)
+
+	if results != nil {
+		if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
+			diagnosisData = diagnosis
+		}
+		if treatment, ok := results["treatment_plan"].(map[string]any); ok {
+			treatmentData = treatment
+		}
+	}
+
+	// Send email if we have an email address
+	emailSent := false
+	emailAddress := ""
+
+	if email, ok := patientData["email"].(string); ok && email != "" {
+		emailAddress = email
+		patientName := "Patient"
+		if name, ok := patientData["name"].(string); ok && name != "" {
+			patientName = name
+		}
+
+		// Create and send the email
+		emailContent := s.emailSender.CreateMedicalSummaryEmail(
+			emailAddress,
+			patientName,
+			diagnosisData,
+			treatmentData,
+		)
+
+		if err := s.emailSender.Send(emailContent); err != nil {
+			logger.Error("Failed to send email", "error", err, "email", emailAddress)
+		} else {
+			logger.Info("Sent medical summary email", "email", emailAddress)
+			emailSent = true
+		}
+	}
+
+	// Record the results in the database
+	resultData := map[string]any{
+		"call_sid":        callSID,
+		"conversation_id": session.ConversationID,
+		"patient_data":    patientData,
+		"diagnosis":       diagnosisData,
+		"treatment_plan":  treatmentData,
+		"workflow_id":     workflowID,
+		"instance_id":     instance.ID.String(),
+		"email_sent":      emailSent,
+		"email_address":   emailAddress,
+		"completed_at":    time.Now(),
+	}
+
+	// If we have patient data with an ID, use it for storage
+	patientID := session.ConversationID
+	if id, ok := patientData["id"].(string); ok && id != "" {
+		patientID = id
+	}
+
+	// Store in result repository
+	if s.resultRepository != nil {
+		if err := s.resultRepository.StoreResults(patientID, resultData); err != nil {
+			logger.Error("Failed to store call results", "error", err, "patient_id", patientID)
+		} else {
+			logger.Info("Stored call results", "patient_id", patientID)
+		}
+	}
+
+	// Create the result object
+	callResult := &CallResult{
+		CallSID:        callSID,
+		ConversationID: session.ConversationID,
+		PatientData:    patientData,
+		Diagnosis:      diagnosisData,
+		Treatment:      treatmentData,
+		WorkflowID:     workflowID,
+		InstanceID:     instance.ID,
+		EmailSent:      emailSent,
+		EmailAddress:   emailAddress,
+		CompletedAt:    time.Now(),
+	}
+
+	return callResult, nil
+}
+
+// registerWebhookHandlers sets up handlers for Twilio webhooks
+func (s *Service) registerWebhookHandlers() {
+	// Register voice webhook handler
+	s.webhookHandler.RegisterCallHandler("voice", func(c *gin.Context, event twilio.CallEvent) (string, error) {
+		return s.handleIncomingCall(c, event)
+	})
+
+	// Register default handler
+	s.webhookHandler.RegisterDefaultHandler(func(c *gin.Context, event twilio.CallEvent) (string, error) {
+		return s.handleIncomingCall(c, event)
+	})
+
+	// Register status handlers
+	s.webhookHandler.RegisterStatusHandler("completed", func(c *gin.Context, event twilio.CallEvent) error {
+		return s.handleCallCompleted(c, event)
+	})
+
+	s.webhookHandler.RegisterStatusHandler("failed", func(c *gin.Context, event twilio.CallEvent) error {
+		return s.handleCallFailed(c, event)
+	})
+}
+
+// handleIncomingCall generates TwiML for incoming calls
+func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (string, error) {
+	callSID := event.CallSID
+
+	s.mu.Lock()
+	session, exists := s.activeStreamingSessions[callSID]
+	if !exists {
+		conversationID := fmt.Sprintf("conv_%d", time.Now().UnixNano())
+		patientPhone := event.From
+
+		conversation, err := s.conversationManager.StartConversation(patientPhone)
+		if err != nil {
+			s.mu.Unlock()
+			logger.Error("Failed to start conversation for incoming call", "error", err)
+			return twilio.GenerateTwiML(
+				twilio.SayAction("Sorry, we're experiencing technical difficulties. Please try again later.", "alice", "en-US"),
+			), nil
+		}
+
+		conversationID = conversation.ID
+
+		session = StreamingSession{
+			CallSID:        callSID,
+			ConversationID: conversationID,
+			IsActive:       true,
+			LastActivity:   time.Now(),
+			PatientPhone:   patientPhone,
+		}
+		s.activeStreamingSessions[callSID] = session
+	}
+	session.LastActivity = time.Now()
+	s.activeStreamingSessions[callSID] = session
+	s.mu.Unlock()
+
+	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
+	if err != nil {
+		logger.Error("Failed to get AI response", "error", err)
+		return twilio.GenerateTwiML(
+			twilio.SayAction("Sorry, I'm having trouble processing that. Let me try again.", "alice", "en-US"),
+		), nil
+	}
+
+	voiceOptions := &elevenlabs.VoiceOptions{
+		Stability:       0.5,
+		SimilarityBoost: 0.75,
+		Style:           0.0,
+		SpeakerBoost:    true,
+	}
+
+	_, err = s.elevenLabsClient.GenerateAudio(aiResponse, voiceOptions)
+	if err != nil {
+		logger.Error("Failed to generate audio", "error", err)
+
+		return twilio.GenerateTwiML(
+			twilio.SayAction(aiResponse, "alice", "en-US"),
+			twilio.GatherAction("", map[string]string{
+				"input":         "speech",
+				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
+				"language":      "en-US",
+				"speechTimeout": "auto",
+			}),
+		), nil
+	}
+
+	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
+
+	return twilio.GenerateTwiML(
+		twilio.PlayAction(audioURL),
+		twilio.GatherAction("", map[string]string{
+			"input":         "speech",
+			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
+			"language":      "en-US",
+			"speechTimeout": "auto",
+		}),
+	), nil
+}
+
+// handleCallCompleted processes a completed call
+func (s *Service) handleCallCompleted(c *gin.Context, event twilio.CallEvent) error {
+	callSID := event.CallSID
+
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		logger.Warn("No session found for completed call", "call_sid", callSID)
+		return nil
+	}
+
+	if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
+		logger.Warn("Error completing conversation", "error", err)
+	}
+
+	go func() {
+		if _, err := s.ProcessCallResults(callSID); err != nil {
+			logger.Error("Failed to process call results", "error", err)
+		}
+	}()
+
+	return nil
+}
+
+// handleCallFailed processes a failed call
+func (s *Service) handleCallFailed(c *gin.Context, event twilio.CallEvent) error {
+	callSID := event.CallSID
+
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		logger.Warn("No session found for failed call", "call_sid", callSID)
+		return nil
+	}
+
+	if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
+		logger.Warn("Error completing conversation", "error", err)
+	}
+
+	logger.Error("Call failed",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
+		"error_code", event.ErrorCode,
+		"error_message", event.ErrorMsg)
+
+	return nil
+}
+
+// HandleSpeechInput processes speech input from a call
+func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, error) {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	if err := s.conversationManager.AddMessage(session.ConversationID, "patient", speechText, 0.9); err != nil {
+		logger.Error("Failed to add patient message", "error", err)
+		return "", err
+	}
+
+	s.mu.Lock()
+	session.LastActivity = time.Now()
+	s.activeStreamingSessions[callSID] = session
+	s.mu.Unlock()
+
+	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
+	if err != nil {
+		logger.Error("Failed to get AI response", "error", err)
+		return "", err
+	}
+
+	return aiResponse, nil
+}
+
+// CleanupInactiveSessions removes sessions that have been inactive for too long
+func (s *Service) CleanupInactiveSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	inactivityThreshold := 15 * time.Minute
+
+	for callSID, session := range s.activeStreamingSessions {
+		if now.Sub(session.LastActivity) > inactivityThreshold {
+			if session.IsActive {
+				if err := s.twilioClient.EndCall(callSID); err != nil {
+					logger.Warn("Failed to end inactive call", "error", err, "call_sid", callSID)
+				}
+			}
+
+			if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
+				logger.Warn("Failed to complete conversation for inactive session", "error", err)
+			}
+
+			delete(s.activeStreamingSessions, callSID)
+			logger.Info("Removed inactive session", "call_sid", callSID)
+		}
+	}
+}
+
+// StartCleanupScheduler starts a goroutine to periodically clean up inactive sessions
+func (s *Service) StartCleanupScheduler(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.CleanupInactiveSessions()
+		}
+	}()
+}
+
+// getMapKeys is a helper function to get the keys from a map
+func getMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}

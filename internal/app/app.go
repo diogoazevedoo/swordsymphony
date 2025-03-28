@@ -156,9 +156,13 @@ func (a *Application) initServer() error {
 		a.workflowService,
 	)
 
+	callH := handler.NewCallController(
+		a.container.CallService,
+	)
+
 	address := fmt.Sprintf(":%s", a.container.Config.Server.Port)
 	a.server = server.NewServer(address)
-	a.server.SetupRoutes(h, adminH)
+	a.server.SetupRoutes(h, adminH, callH)
 
 	return nil
 }

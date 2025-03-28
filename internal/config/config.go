@@ -8,10 +8,14 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	AI       AIConfig
-	Medical  MedicalConfig
+	Server     ServerConfig
+	Database   DatabaseConfig
+	AI         AIConfig
+	Medical    MedicalConfig
+	Twilio     TwilioConfig
+	ElevenLabs ElevenLabsConfig
+	Deepgram   DeepgramConfig
+	Email      EmailConfig
 }
 
 // ServerConfig holds server-related configuration
@@ -43,6 +47,42 @@ type AIConfig struct {
 // MedicalConfig holds medical knowledge base configuration
 type MedicalConfig struct {
 	DataPath string
+}
+
+// TwilioConfig holds Twilio configuration
+type TwilioConfig struct {
+	AccountSID     string
+	AuthToken      string
+	PhoneNumber    string
+	WebhookBaseURL string
+}
+
+// ElevenLabsConfig holds ElevenLabs configuration
+type ElevenLabsConfig struct {
+	APIKey          string
+	VoiceID         string
+	ModelID         string
+	Stability       float64
+	SimilarityBoost float64
+}
+
+// DeepgramConfig holds Deepgram configuration
+type DeepgramConfig struct {
+	APIKey   string
+	Language string
+	Model    string
+	Tier     string
+}
+
+// EmailConfig holds email configuration
+type EmailConfig struct {
+	SMTPServer   string
+	SMTPPort     int
+	Username     string
+	Password     string
+	FromAddress  string
+	FromName     string
+	TemplatesDir string
 }
 
 // LoadConfig loads configuration from environment variables
@@ -90,6 +130,49 @@ func LoadConfig() (*Config, error) {
 
 	medicalDataPath := getEnv("MEDICAL_DATA_PATH", "")
 
+	// Twilio configuration
+	twilioAccountSID := getEnv("TWILIO_ACCOUNT_SID", "")
+	twilioAuthToken := getEnv("TWILIO_AUTH_TOKEN", "")
+	twilioPhoneNumber := getEnv("TWILIO_PHONE_NUMBER", "")
+	twilioWebhookBaseURL := getEnv("TWILIO_WEBHOOK_BASE_URL", "")
+
+	// ElevenLabs configuration
+	elevenLabsAPIKey := getEnv("ELEVENLABS_API_KEY", "")
+	elevenLabsVoiceID := getEnv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+	elevenLabsModelID := getEnv("ELEVENLABS_MODEL_ID", "eleven_monolingual_v1")
+	elevenLabsStabilityStr := getEnv("ELEVENLABS_STABILITY", "0.5")
+	elevenLabsSimilarityBoostStr := getEnv("ELEVENLABS_SIMILARITY_BOOST", "0.75")
+
+	elevenLabsStability, err := strconv.ParseFloat(elevenLabsStabilityStr, 64)
+	if err != nil {
+		elevenLabsStability = 0.5
+	}
+
+	elevenLabsSimilarityBoost, err := strconv.ParseFloat(elevenLabsSimilarityBoostStr, 64)
+	if err != nil {
+		elevenLabsSimilarityBoost = 0.75
+	}
+
+	// Deepgram configuration
+	deepgramAPIKey := getEnv("DEEPGRAM_API_KEY", "")
+	deepgramLanguage := getEnv("DEEPGRAM_LANGUAGE", "en-US")
+	deepgramModel := getEnv("DEEPGRAM_MODEL", "general")
+	deepgramTier := getEnv("DEEPGRAM_TIER", "enhanced")
+
+	// Email configuration
+	emailSMTPServer := getEnv("EMAIL_SMTP_SERVER", "smtp.gmail.com")
+	emailSMTPPortStr := getEnv("EMAIL_SMTP_PORT", "587")
+	emailUsername := getEnv("EMAIL_USERNAME", "")
+	emailPassword := getEnv("EMAIL_PASSWORD", "")
+	emailFromAddress := getEnv("EMAIL_FROM_ADDRESS", emailUsername)
+	emailFromName := getEnv("EMAIL_FROM_NAME", "SwordSymphony Medical AI")
+	emailTemplatesDir := getEnv("EMAIL_TEMPLATES_DIR", "./templates/email")
+
+	emailSMTPPort, err := strconv.Atoi(emailSMTPPortStr)
+	if err != nil {
+		emailSMTPPort = 587
+	}
+
 	return &Config{
 		Server: ServerConfig{
 			Port:         port,
@@ -113,6 +196,34 @@ func LoadConfig() (*Config, error) {
 		},
 		Medical: MedicalConfig{
 			DataPath: medicalDataPath,
+		},
+		Twilio: TwilioConfig{
+			AccountSID:     twilioAccountSID,
+			AuthToken:      twilioAuthToken,
+			PhoneNumber:    twilioPhoneNumber,
+			WebhookBaseURL: twilioWebhookBaseURL,
+		},
+		ElevenLabs: ElevenLabsConfig{
+			APIKey:          elevenLabsAPIKey,
+			VoiceID:         elevenLabsVoiceID,
+			ModelID:         elevenLabsModelID,
+			Stability:       elevenLabsStability,
+			SimilarityBoost: elevenLabsSimilarityBoost,
+		},
+		Deepgram: DeepgramConfig{
+			APIKey:   deepgramAPIKey,
+			Language: deepgramLanguage,
+			Model:    deepgramModel,
+			Tier:     deepgramTier,
+		},
+		Email: EmailConfig{
+			SMTPServer:   emailSMTPServer,
+			SMTPPort:     emailSMTPPort,
+			Username:     emailUsername,
+			Password:     emailPassword,
+			FromAddress:  emailFromAddress,
+			FromName:     emailFromName,
+			TemplatesDir: emailTemplatesDir,
 		},
 	}, nil
 }

@@ -6,7 +6,7 @@ import (
 )
 
 // SetupRoutes configures all the routes for the API
-func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.ManagementHandler) {
+func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.ManagementHandler, callH *handler.CallController) {
 	api := s.router.Group("/api")
 	api.Use(middleware.CORS())
 	api.Use(middleware.RequestLogger())
@@ -31,6 +31,22 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 		api.GET("/agents/:agent_id", h.GetAgentDetails)
 
 		api.GET("/messages", h.GetMessages)
+
+		call := api.Group("/call")
+		{
+			call.POST("/start", callH.StartCall)
+			call.POST("/end/:call_sid", callH.EndCall)
+			call.GET("/results/:call_sid", callH.GetCallResults)
+
+			call.POST("/webhook", callH.HandleWebhook)
+			call.POST("/status", callH.HandleStatusCallback)
+			call.POST("/speech", callH.HandleSpeechCallback)
+
+			call.POST("/audio/:call_sid", callH.StoreAudio)
+			call.GET("/audio/:call_sid", callH.GetAudio)
+			call.POST("/stream/:call_sid", callH.HandleStreamingAudio)
+			call.POST("/upload", callH.UploadRecordedFile)
+		}
 
 		admin := api.Group("/management")
 		{
