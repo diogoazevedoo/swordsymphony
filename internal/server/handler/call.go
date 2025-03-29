@@ -107,40 +107,76 @@ func (c *CallController) HandleStatusCallback(ctx *gin.Context) {
 func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 	callSID := ctx.Query("call_sid")
 	if callSID == "" {
+		logger.Error("Speech callback missing call_sid")
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Call SID is required"})
 		return
 	}
 
 	speechInput := ctx.PostForm("SpeechResult")
+	logger.Info("Speech callback received",
+		"call_sid", callSID,
+		"input", speechInput,
+		"input_length", len(speechInput),
+		"form_keys", ctx.Request.PostForm)
+
 	if speechInput == "" {
+		logger.Warn("Empty speech input received",
+			"call_sid", callSID,
+			"form_data", ctx.Request.PostForm)
+
 		twiml := `<?xml version="1.0" encoding="UTF-8"?><Response>
-			<Say voice="alice">I'm sorry, I didn't catch that. Could you please repeat?</Say>
-			<Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
-		</Response>`
+            <Say voice="alice">I'm sorry, I didn't catch that. Could you please repeat?</Say>
+            <Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
+        </Response>`
 
 		ctx.Header("Content-Type", "text/xml")
 		ctx.String(http.StatusOK, twiml)
 		return
 	}
 
-	logger.Info("Received speech input", "call_sid", callSID, "input", speechInput)
+	// Try multiple times if needed
+	var aiResponse string
+	var err error
+	maxRetries := 3
 
-	aiResponse, err := c.callService.HandleSpeechInput(callSID, speechInput)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		aiResponse, err = c.callService.HandleSpeechInput(callSID, speechInput)
+		if err == nil {
+			break
+		}
+		logger.Warn("Retry handling speech input",
+			"call_sid", callSID,
+			"attempt", attempt+1,
+			"error", err)
+
+		// Small delay between retries
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	if err != nil {
-		logger.Error("Error handling speech input", "error", err)
+		logger.Error("Error handling speech input after retries", "error", err)
 
 		twiml := `<?xml version="1.0" encoding="UTF-8"?><Response>
-			<Say voice="alice">I'm having trouble processing that. Let me try again.</Say>
-			<Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
-		</Response>`
+            <Say voice="alice">I'm having trouble processing that. Let me try again.</Say>
+            <Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
+        </Response>`
 
 		ctx.Header("Content-Type", "text/xml")
 		ctx.String(http.StatusOK, twiml)
 		return
 	}
 
-	_, err = c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
+	logger.Info("Generated AI response",
+		"call_sid", callSID,
+		"response", aiResponse,
+		"response_length", len(aiResponse))
+
+	audioBytes, err := c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
 	if err != nil {
+		logger.Warn("Failed to generate audio, falling back to Twilio voice",
+			"call_sid", callSID,
+			"error", err)
+
 		// If audio generation fails, fall back to Twilio's voice
 		twiml := `<?xml version="1.0" encoding="UTF-8"?><Response>
             <Say voice="alice">` + aiResponse + `</Say>
@@ -151,6 +187,10 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		ctx.String(http.StatusOK, twiml)
 		return
 	}
+
+	logger.Info("Audio generated successfully",
+		"call_sid", callSID,
+		"audio_size", len(audioBytes))
 
 	audioURL := c.callService.GetBaseURL() + "/api/call/audio/" + callSID
 
@@ -166,13 +206,21 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 func (c *CallController) StoreAudio(ctx *gin.Context) {
 	callSID := ctx.Param("call_sid")
 	if callSID == "" {
+		logger.Error("Store audio request missing call_sid")
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Call SID is required"})
 		return
 	}
 
 	audioData, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
+		logger.Error("Failed to read audio data", "error", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read audio data"})
+		return
+	}
+
+	if len(audioData) == 0 {
+		logger.Error("Received empty audio data", "call_sid", callSID)
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Audio data is empty"})
 		return
 	}
 
@@ -183,13 +231,18 @@ func (c *CallController) StoreAudio(ctx *gin.Context) {
 
 	// Set up a cleanup timer
 	go func() {
-		time.Sleep(5 * time.Minute)
+		time.Sleep(15 * time.Minute) // Longer timeout to ensure it's available
 		c.audioMutex.Lock()
 		delete(c.audioFiles, callSID)
 		c.audioMutex.Unlock()
+		logger.Info("Cleaned up audio for call", "call_sid", callSID)
 	}()
 
-	logger.Info("Stored audio for call", "call_sid", callSID, "size", len(audioData))
+	logger.Info("Stored audio for call",
+		"call_sid", callSID,
+		"size", len(audioData),
+		"content_type", ctx.GetHeader("Content-Type"))
+
 	ctx.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Audio stored successfully",
@@ -200,6 +253,7 @@ func (c *CallController) StoreAudio(ctx *gin.Context) {
 func (c *CallController) GetAudio(ctx *gin.Context) {
 	callSID := ctx.Param("call_sid")
 	if callSID == "" {
+		logger.Error("Get audio request missing call_sid")
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Call SID is required"})
 		return
 	}
@@ -208,15 +262,21 @@ func (c *CallController) GetAudio(ctx *gin.Context) {
 	audioData, exists := c.audioFiles[callSID]
 	c.audioMutex.RUnlock()
 
-	if !exists {
+	if !exists || len(audioData) == 0 {
+		logger.Error("Audio not found or empty", "call_sid", callSID)
 		ctx.JSON(http.StatusNotFound, gin.H{"error": "Audio not found"})
 		return
 	}
 
+	logger.Info("Serving audio for call",
+		"call_sid", callSID,
+		"size", len(audioData))
+
 	ctx.Header("Content-Type", "audio/mpeg")
 	ctx.Header("Content-Length", fmt.Sprintf("%d", len(audioData)))
+	ctx.Header("Cache-Control", "public, max-age=300") // Cache for 5 minutes
 
-	ctx.Writer.Write(audioData)
+	ctx.Data(http.StatusOK, "audio/mpeg", audioData)
 }
 
 // HandleStreamingAudio processes audio stream data

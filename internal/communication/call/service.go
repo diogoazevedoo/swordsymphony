@@ -316,7 +316,32 @@ func (s *Service) registerWebhookHandlers() {
 		return s.handleIncomingCall(c, event)
 	})
 
-	// Register status handlers
+	// Register status handlers for all possible call statuses
+	s.webhookHandler.RegisterStatusHandler("initiated", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Call initiated", "call_sid", event.CallSID)
+		return nil
+	})
+
+	s.webhookHandler.RegisterStatusHandler("ringing", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Call ringing", "call_sid", event.CallSID)
+		return nil
+	})
+
+	s.webhookHandler.RegisterStatusHandler("in-progress", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Call in progress", "call_sid", event.CallSID)
+		return nil
+	})
+
+	s.webhookHandler.RegisterStatusHandler("no-answer", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Call not answered", "call_sid", event.CallSID)
+		return nil
+	})
+
+	s.webhookHandler.RegisterStatusHandler("busy", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Line busy", "call_sid", event.CallSID)
+		return nil
+	})
+
 	s.webhookHandler.RegisterStatusHandler("completed", func(c *gin.Context, event twilio.CallEvent) error {
 		return s.handleCallCompleted(c, event)
 	})
@@ -324,17 +349,30 @@ func (s *Service) registerWebhookHandlers() {
 	s.webhookHandler.RegisterStatusHandler("failed", func(c *gin.Context, event twilio.CallEvent) error {
 		return s.handleCallFailed(c, event)
 	})
+
+	s.webhookHandler.RegisterStatusHandler("canceled", func(c *gin.Context, event twilio.CallEvent) error {
+		logger.Info("Call canceled", "call_sid", event.CallSID)
+		return nil
+	})
 }
 
 // handleIncomingCall generates TwiML for incoming calls
 func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (string, error) {
 	callSID := event.CallSID
+	logger.Info("Handling incoming call",
+		"call_sid", callSID,
+		"from", event.From,
+		"status", event.Status)
 
 	s.mu.Lock()
 	session, exists := s.activeStreamingSessions[callSID]
 	if !exists {
 		conversationID := fmt.Sprintf("conv_%d", time.Now().UnixNano())
 		patientPhone := event.From
+
+		logger.Info("Creating new conversation for call",
+			"call_sid", callSID,
+			"patient_phone", patientPhone)
 
 		conversation, err := s.conversationManager.StartConversation(patientPhone)
 		if err != nil {
@@ -346,6 +384,9 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 		}
 
 		conversationID = conversation.ID
+		logger.Info("Created new conversation",
+			"conversation_id", conversationID,
+			"call_sid", callSID)
 
 		session = StreamingSession{
 			CallSID:        callSID,
@@ -360,13 +401,27 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
+	logger.Info("Getting AI response for conversation",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID)
+
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
 		return twilio.GenerateTwiML(
 			twilio.SayAction("Sorry, I'm having trouble processing that. Let me try again.", "alice", "en-US"),
+			twilio.GatherAction("", map[string]string{
+				"input":         "speech",
+				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
+				"language":      "en-US",
+				"speechTimeout": "auto",
+			}),
 		), nil
 	}
+
+	logger.Info("Got AI response",
+		"call_sid", callSID,
+		"response_length", len(aiResponse))
 
 	voiceOptions := &elevenlabs.VoiceOptions{
 		Stability:       0.5,
@@ -377,6 +432,10 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 
 	audioResponse, err := s.elevenLabsClient.GenerateAudio(aiResponse, voiceOptions)
 	if err != nil {
+		logger.Warn("Failed to generate audio, falling back to Twilio voice",
+			"call_sid", callSID,
+			"error", err)
+
 		return twilio.GenerateTwiML(
 			twilio.SayAction(aiResponse, "alice", "en-US"),
 			twilio.GatherAction("", map[string]string{
@@ -388,24 +447,46 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 		), nil
 	}
 
+	logger.Info("Generated audio response",
+		"call_sid", callSID,
+		"audio_size", len(audioResponse.AudioBytes))
+
 	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
 
 	req, err := http.NewRequest("POST", audioURL, bytes.NewBuffer(audioResponse.AudioBytes))
 	if err != nil {
+		logger.Error("Failed to create request to store audio", "error", err)
 		return twilio.GenerateTwiML(
 			twilio.SayAction(aiResponse, "alice", "en-US"),
+			twilio.GatherAction("", map[string]string{
+				"input":         "speech",
+				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
+				"language":      "en-US",
+				"speechTimeout": "auto",
+			}),
 		), nil
 	}
+
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		logger.Error("Failed to store audio", "error", err)
 		return twilio.GenerateTwiML(
 			twilio.SayAction(aiResponse, "alice", "en-US"),
+			twilio.GatherAction("", map[string]string{
+				"input":         "speech",
+				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
+				"language":      "en-US",
+				"speechTimeout": "auto",
+			}),
 		), nil
 	}
 	defer resp.Body.Close()
+
+	logger.Info("Successfully stored audio and generating TwiML response",
+		"call_sid", callSID)
 
 	return twilio.GenerateTwiML(
 		twilio.PlayAction(audioURL),
@@ -477,8 +558,40 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 	s.mu.RUnlock()
 
 	if !exists {
-		return "", fmt.Errorf("no active session for call %s", callSID)
+		logger.Error("No active session for call", "call_sid", callSID)
+
+		// Try to recover by creating a new session
+		logger.Info("Attempting to recover session", "call_sid", callSID)
+
+		// Create a fallback conversation
+		conversation, err := s.conversationManager.StartConversation("unknown")
+		if err != nil {
+			return "", fmt.Errorf("failed to create recovery conversation: %w", err)
+		}
+
+		newSession := StreamingSession{
+			CallSID:        callSID,
+			ConversationID: conversation.ID,
+			IsActive:       true,
+			LastActivity:   time.Now(),
+			PatientPhone:   "unknown",
+		}
+
+		s.mu.Lock()
+		s.activeStreamingSessions[callSID] = newSession
+		s.mu.Unlock()
+
+		logger.Info("Created recovery session",
+			"call_sid", callSID,
+			"conversation_id", conversation.ID)
+
+		session = newSession
 	}
+
+	logger.Info("Processing speech input",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
+		"input", speechText)
 
 	if err := s.conversationManager.AddMessage(session.ConversationID, "patient", speechText, 0.9); err != nil {
 		logger.Error("Failed to add patient message", "error", err)
@@ -490,11 +603,34 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
-	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
-	if err != nil {
-		logger.Error("Failed to get AI response", "error", err)
-		return "", err
+	// Try up to 3 times to get a response
+	var aiResponse string
+	var err error
+	maxRetries := 3
+
+	for i := 0; i < maxRetries; i++ {
+		aiResponse, err = s.conversationManager.GetNextResponse(session.ConversationID)
+		if err == nil {
+			break
+		}
+
+		logger.Warn("Retry getting AI response",
+			"call_sid", callSID,
+			"conversation_id", session.ConversationID,
+			"attempt", i+1,
+			"error", err)
+
+		time.Sleep(500 * time.Millisecond)
 	}
+
+	if err != nil {
+		logger.Error("Failed to get AI response after retries", "error", err)
+		return "I'm sorry, but I'm having trouble understanding right now. Could we try again?", nil
+	}
+
+	logger.Info("Successfully generated AI response",
+		"call_sid", callSID,
+		"response_length", len(aiResponse))
 
 	return aiResponse, nil
 }

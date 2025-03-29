@@ -214,16 +214,22 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 
 	conversation.Transcript = append(conversation.Transcript, exchange)
 
-	if speaker == "patient" && !exchange.IsProcessed {
-		go m.analyzePatientMessage(conversationID, len(conversation.Transcript)-1)
-	}
-
 	logger.Info("Added message to conversation",
 		"conversation_id", conversationID,
 		"speaker", speaker,
 		"text_length", len(text),
 		"confidence", confidence)
 
+	// Unlock before processing to prevent deadlocks but reacquire after
+	m.mu.Unlock()
+
+	// Process patient messages synchronously instead of in a goroutine
+	if speaker == "patient" && !exchange.IsProcessed {
+		m.analyzePatientMessage(conversationID, len(conversation.Transcript)-1)
+	}
+
+	// Reacquire the lock for the return
+	m.mu.Lock()
 	return nil
 }
 
@@ -316,6 +322,9 @@ func (m *ConversationManager) analyzePatientMessage(conversationID string, messa
 	conversation, exists := m.activeConversations[conversationID]
 	if !exists || messageIndex >= len(conversation.Transcript) {
 		m.mu.RUnlock()
+		logger.Error("Cannot analyze message - conversation not found or message index invalid",
+			"conversation_id", conversationID,
+			"message_index", messageIndex)
 		return
 	}
 
@@ -334,6 +343,10 @@ func (m *ConversationManager) analyzePatientMessage(conversationID string, messa
 	}
 
 	ctx := contextBuilder.String()
+	logger.Info("Analyzing patient message",
+		"conversation_id", conversationID,
+		"message_text", message.Text,
+		"status", status)
 	m.mu.RUnlock()
 
 	var analysisPrompt string
@@ -409,16 +422,40 @@ Patient message: "%s"
 		return
 	}
 
+	// Extract JSON from response - look for everything between { and }
 	jsonStart := strings.Index(response.Text, "{")
 	jsonEnd := strings.LastIndex(response.Text, "}")
 
 	if jsonStart >= 0 && jsonEnd > jsonStart {
 		jsonText := response.Text[jsonStart : jsonEnd+1]
+		logger.Info("Extracted JSON from analysis", "json", jsonText)
 
 		var extractedData map[string]interface{}
 		err = json.Unmarshal([]byte(jsonText), &extractedData)
 		if err != nil {
 			logger.Error("Error parsing JSON from analysis", "error", err, "json", jsonText)
+
+			// Fallback for name extraction
+			if status == StatusGreeting {
+				m.mu.Lock()
+				conversation, exists := m.activeConversations[conversationID]
+				if exists && messageIndex < len(conversation.Transcript) {
+					patientMessage := conversation.Transcript[messageIndex].Text
+					// Simple heuristic: Just use first 30 chars as name if needed
+					if patientMessage != "" {
+						nameToUse := patientMessage
+						if len(nameToUse) > 30 {
+							nameToUse = nameToUse[:30]
+						}
+						conversation.PatientName = nameToUse
+						conversation.CollectedData["patient_name"] = nameToUse
+						logger.Info("Used fallback name extraction",
+							"name", nameToUse,
+							"conversation_id", conversationID)
+					}
+				}
+				m.mu.Unlock()
+			}
 			return
 		}
 
@@ -441,12 +478,28 @@ Patient message: "%s"
 			if ok && patientName != "" {
 				conversation.PatientName = patientName
 				conversation.CollectedData["patient_name"] = patientName
+				logger.Info("Extracted patient name",
+					"name", patientName,
+					"conversation_id", conversationID)
+			} else {
+				// Fallback: use the message text as the name
+				patientMessage := conversation.Transcript[messageIndex].Text
+				if patientMessage != "" {
+					conversation.PatientName = patientMessage
+					conversation.CollectedData["patient_name"] = patientMessage
+					logger.Info("Using message as patient name",
+						"name", patientMessage,
+						"conversation_id", conversationID)
+				}
 			}
 		} else if status == StatusIdentity && extractedData["patient_email"] != nil {
 			patientEmail, ok := extractedData["patient_email"].(string)
 			if ok && patientEmail != "" {
 				conversation.PatientEmail = patientEmail
 				conversation.CollectedData["patient_email"] = patientEmail
+				logger.Info("Extracted patient email",
+					"email", patientEmail,
+					"conversation_id", conversationID)
 			}
 		} else {
 			for key, value := range extractedData {
@@ -472,7 +525,30 @@ Patient message: "%s"
 
 		logger.Info("Analyzed patient message",
 			"conversation_id", conversationID,
-			"extracted_keys", getMapKeys(extractedData))
+			"extracted_keys", getMapKeys(extractedData),
+			"patient_name", conversation.PatientName,
+			"conversation_status", conversation.Status)
+	} else {
+		logger.Error("No JSON found in analysis response",
+			"response", response.Text,
+			"conversation_id", conversationID)
+
+		// Fallback for name extraction
+		if status == StatusGreeting {
+			m.mu.Lock()
+			conversation, exists := m.activeConversations[conversationID]
+			if exists && messageIndex < len(conversation.Transcript) {
+				patientMessage := conversation.Transcript[messageIndex].Text
+				if patientMessage != "" {
+					conversation.PatientName = patientMessage
+					conversation.CollectedData["patient_name"] = patientMessage
+					logger.Info("Used fallback name extraction after JSON parsing failure",
+						"name", patientMessage,
+						"conversation_id", conversationID)
+				}
+			}
+			m.mu.Unlock()
+		}
 	}
 }
 
@@ -486,17 +562,67 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		return
 	}
 
+	logger.Info("Checking conversation progression",
+		"conversation_id", conversationID,
+		"current_status", conversation.Status,
+		"has_name", conversation.PatientName != "",
+		"has_email", conversation.PatientEmail != "")
+
 	switch conversation.Status {
 	case StatusGreeting:
 		if conversation.PatientName != "" {
 			conversation.Status = StatusIdentity
-			logger.Info("Conversation progressed to identity stage", "conversation_id", conversationID)
+			logger.Info("Conversation progressed to identity stage",
+				"conversation_id", conversationID,
+				"patient_name", conversation.PatientName)
+		} else {
+			// Force progression if we've been in greeting stage too long
+			greetingCount := 0
+			for _, exchange := range conversation.Transcript {
+				if exchange.Speaker == "ai" {
+					greetingCount++
+				}
+			}
+			if greetingCount >= 3 {
+				// Set a placeholder name if needed
+				if conversation.PatientName == "" {
+					conversation.PatientName = "Patient"
+					conversation.CollectedData["patient_name"] = "Patient"
+				}
+				conversation.Status = StatusIdentity
+				logger.Info("Forced progression to identity stage",
+					"conversation_id", conversationID,
+					"greeting_count", greetingCount)
+			}
 		}
 
 	case StatusIdentity:
 		if conversation.PatientEmail != "" {
 			conversation.Status = StatusSymptoms
-			logger.Info("Conversation progressed to symptoms stage", "conversation_id", conversationID)
+			logger.Info("Conversation progressed to symptoms stage",
+				"conversation_id", conversationID,
+				"patient_email", conversation.PatientEmail)
+		} else {
+			// Force progression if we've been in identity stage too long
+			identityCount := 0
+			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+				if conversation.Transcript[i].Speaker == "ai" &&
+					conversation.Status == StatusIdentity {
+					identityCount++
+				}
+				if identityCount >= 3 {
+					// Set a placeholder email if needed
+					if conversation.PatientEmail == "" {
+						conversation.PatientEmail = "unknown@example.com"
+						conversation.CollectedData["patient_email"] = "unknown@example.com"
+					}
+					conversation.Status = StatusSymptoms
+					logger.Info("Forced progression to symptoms stage",
+						"conversation_id", conversationID,
+						"identity_count", identityCount)
+					break
+				}
+			}
 		}
 
 	case StatusSymptoms:
@@ -509,7 +635,9 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 				}
 				if symptomsCount >= 3 {
 					conversation.Status = StatusHistory
-					logger.Info("Conversation progressed to history stage", "conversation_id", conversationID)
+					logger.Info("Conversation progressed to history stage",
+						"conversation_id", conversationID,
+						"symptoms_collected", len(symptoms))
 					break
 				}
 			}
@@ -525,7 +653,24 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 				}
 				if historyCount >= 2 {
 					conversation.Status = StatusMedication
-					logger.Info("Conversation progressed to medication stage", "conversation_id", conversationID)
+					logger.Info("Conversation progressed to medication stage",
+						"conversation_id", conversationID,
+						"conditions_collected", len(conditions))
+					break
+				}
+			}
+		} else {
+			// Advance anyway if we've been in history stage for a while
+			historyCount := 0
+			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+				if conversation.Transcript[i].Speaker == "ai" &&
+					conversation.Status == StatusHistory {
+					historyCount++
+				}
+				if historyCount >= 3 {
+					conversation.Status = StatusMedication
+					logger.Info("Forced progression to medication stage",
+						"conversation_id", conversationID)
 					break
 				}
 			}
@@ -541,18 +686,25 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 			hasAllergies = len(allergies) > 0
 		}
 
-		if hasMedications || hasAllergies {
-			medicationCount := 0
-			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-				if conversation.Transcript[i].Speaker == "ai" &&
-					conversation.Status == StatusMedication {
-					medicationCount++
-				}
-				if medicationCount >= 2 {
-					conversation.Status = StatusQuestions
-					logger.Info("Conversation progressed to questions stage", "conversation_id", conversationID)
-					break
-				}
+		medicationCount := 0
+		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+			if conversation.Transcript[i].Speaker == "ai" &&
+				conversation.Status == StatusMedication {
+				medicationCount++
+			}
+			if (hasMedications || hasAllergies) && medicationCount >= 2 {
+				conversation.Status = StatusQuestions
+				logger.Info("Conversation progressed to questions stage",
+					"conversation_id", conversationID,
+					"has_medications", hasMedications,
+					"has_allergies", hasAllergies)
+				break
+			} else if medicationCount >= 3 {
+				// Force progression after 3 exchanges even without data
+				conversation.Status = StatusQuestions
+				logger.Info("Forced progression to questions stage",
+					"conversation_id", conversationID)
+				break
 			}
 		}
 
@@ -565,7 +717,8 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 			}
 			if questionCount >= 2 {
 				conversation.Status = StatusClosing
-				logger.Info("Conversation progressed to closing stage", "conversation_id", conversationID)
+				logger.Info("Conversation progressed to closing stage",
+					"conversation_id", conversationID)
 				break
 			}
 		}
@@ -585,7 +738,8 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		}
 
 		if closingDelivered && patientReplied {
-			logger.Info("Conversation ready for completion", "conversation_id", conversationID)
+			logger.Info("Conversation ready for completion",
+				"conversation_id", conversationID)
 		}
 	}
 }
