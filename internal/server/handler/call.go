@@ -139,16 +139,30 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		return
 	}
 
+	_, err = c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
+	if err != nil {
+		// If audio generation fails, fall back to Twilio's voice
+		twiml := `<?xml version="1.0" encoding="UTF-8"?><Response>
+            <Say voice="alice">` + aiResponse + `</Say>
+            <Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
+        </Response>`
+
+		ctx.Header("Content-Type", "text/xml")
+		ctx.String(http.StatusOK, twiml)
+		return
+	}
+
+	audioURL := c.callService.GetBaseURL() + "/api/call/audio/" + callSID
+
 	twiml := `<?xml version="1.0" encoding="UTF-8"?><Response>
-		<Say voice="alice">` + aiResponse + `</Say>
-		<Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
-	</Response>`
+        <Play>` + audioURL + `</Play>
+        <Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
+    </Response>`
 
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiml)
 }
 
-// StoreAudio stores audio data for a call
 func (c *CallController) StoreAudio(ctx *gin.Context) {
 	callSID := ctx.Param("call_sid")
 	if callSID == "" {
@@ -162,10 +176,12 @@ func (c *CallController) StoreAudio(ctx *gin.Context) {
 		return
 	}
 
+	// Store the audio in memory
 	c.audioMutex.Lock()
 	c.audioFiles[callSID] = audioData
 	c.audioMutex.Unlock()
 
+	// Set up a cleanup timer
 	go func() {
 		time.Sleep(5 * time.Minute)
 		c.audioMutex.Lock()
@@ -173,6 +189,7 @@ func (c *CallController) StoreAudio(ctx *gin.Context) {
 		c.audioMutex.Unlock()
 	}()
 
+	logger.Info("Stored audio for call", "call_sid", callSID, "size", len(audioData))
 	ctx.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Audio stored successfully",

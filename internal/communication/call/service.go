@@ -1,8 +1,10 @@
 package call
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -373,10 +375,8 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 		SpeakerBoost:    true,
 	}
 
-	_, err = s.elevenLabsClient.GenerateAudio(aiResponse, voiceOptions)
+	audioResponse, err := s.elevenLabsClient.GenerateAudio(aiResponse, voiceOptions)
 	if err != nil {
-		logger.Error("Failed to generate audio", "error", err)
-
 		return twilio.GenerateTwiML(
 			twilio.SayAction(aiResponse, "alice", "en-US"),
 			twilio.GatherAction("", map[string]string{
@@ -389,6 +389,23 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	}
 
 	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
+
+	req, err := http.NewRequest("POST", audioURL, bytes.NewBuffer(audioResponse.AudioBytes))
+	if err != nil {
+		return twilio.GenerateTwiML(
+			twilio.SayAction(aiResponse, "alice", "en-US"),
+		), nil
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return twilio.GenerateTwiML(
+			twilio.SayAction(aiResponse, "alice", "en-US"),
+		), nil
+	}
+	defer resp.Body.Close()
 
 	return twilio.GenerateTwiML(
 		twilio.PlayAction(audioURL),
@@ -527,4 +544,44 @@ func getMapKeys(m map[string]any) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// Add to internal/communication/call/service.go:
+func (s *Service) GenerateAndStoreAudioResponse(callSID string, text string) ([]byte, error) {
+	voiceOptions := &elevenlabs.VoiceOptions{
+		Stability:       0.5,
+		SimilarityBoost: 0.75,
+		Style:           0.0,
+		SpeakerBoost:    true,
+	}
+
+	// Generate audio
+	audioResponse, err := s.elevenLabsClient.GenerateAudio(text, voiceOptions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate audio: %w", err)
+	}
+
+	// Store the audio data via API
+	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
+
+	req, err := http.NewRequest("POST", audioURL, bytes.NewBuffer(audioResponse.AudioBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to store audio: %w", err)
+	}
+	defer resp.Body.Close()
+
+	return audioResponse.AudioBytes, nil
+}
+
+// Add getter for baseURL
+func (s *Service) GetBaseURL() string {
+	return s.baseURL
 }
