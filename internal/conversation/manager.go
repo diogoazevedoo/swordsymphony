@@ -290,7 +290,7 @@ Based on the conversation so far and the current stage, provide your next respon
 `, m.systemPrompt, conversation.Status, prompt, conversationContext.String())
 
 	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
-		MaxTokens:    256,
+		MaxTokens:    150,
 		Temperature:  0.7,
 		SystemPrompt: m.systemPrompt,
 	})
@@ -905,4 +905,21 @@ func getMapKeys(m map[string]any) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// GetConversationMessages retrieves all messages in a conversation
+func (m *ConversationManager) GetConversationMessages(conversationID string) ([]MessageExchange, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return nil, fmt.Errorf("conversation %s not found", conversationID)
+	}
+
+	// Return a copy to prevent modification
+	messages := make([]MessageExchange, len(conversation.Transcript))
+	copy(messages, conversation.Transcript)
+
+	return messages, nil
 }

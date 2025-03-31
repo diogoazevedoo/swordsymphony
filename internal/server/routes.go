@@ -35,6 +35,7 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 		call := api.Group("/call")
 		{
 			call.POST("/start", callH.StartCall)
+			call.GET("/response/:call_sid", callH.GetResponse)
 			call.POST("/end/:call_sid", callH.EndCall)
 			call.GET("/results/:call_sid", callH.GetCallResults)
 

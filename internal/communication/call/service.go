@@ -721,3 +721,41 @@ func (s *Service) GenerateAndStoreAudioResponse(callSID string, text string) ([]
 func (s *Service) GetBaseURL() string {
 	return s.baseURL
 }
+
+// StoreMessage stores a message in the conversation
+func (s *Service) StoreMessage(callSID string, speaker string, text string) error {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	return s.conversationManager.AddMessage(session.ConversationID, speaker, text, 0.9)
+}
+
+// GetLastAIResponse gets the last AI response for a call
+func (s *Service) GetLastAIResponse(callSID string) (string, error) {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	messages, err := s.conversationManager.GetConversationMessages(session.ConversationID)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the last AI message
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Speaker == "ai" {
+			return messages[i].Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no AI messages found")
+}

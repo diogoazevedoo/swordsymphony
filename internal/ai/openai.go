@@ -64,6 +64,11 @@ func (c *openAIClient) GenerateCompletion(ctx context.Context, prompt string, op
 	model := "gpt-4"
 	if options.ModelName != "" {
 		model = options.ModelName
+	} else if strings.Contains(strings.ToLower(prompt), "conversation") ||
+		strings.Contains(strings.ToLower(prompt), "patient") ||
+		strings.Contains(strings.ToLower(prompt), "medical assistant") {
+		model = "gpt-3.5-turbo"
+		c.httpClient.Timeout = 15 * time.Second
 	}
 
 	messages := []openAIMessage{
