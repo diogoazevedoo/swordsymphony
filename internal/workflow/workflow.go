@@ -1685,3 +1685,10 @@ func (e *WorkflowEngine) ensureRequiredAgentsExist(workflowDef WorkflowDefinitio
 
 	return nil
 }
+
+// GetResultRepository returns the result repository
+func (e *WorkflowEngine) GetResultRepository() repository.ResultRepository {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.resultRepository
+}

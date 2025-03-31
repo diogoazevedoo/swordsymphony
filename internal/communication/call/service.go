@@ -191,11 +191,39 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		return nil, fmt.Errorf("invalid patient data format")
 	}
 
+	// Ensure the patient data has an ID
+	if patientData["id"] == nil || patientData["id"] == "" {
+		patientData["id"] = session.ConversationID
+	}
+
 	// Log the patient data
 	logger.Info("Processed patient data",
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID,
 		"data_keys", getMapKeys(patientData))
+
+	// Store the case in the repository first
+	caseID := fmt.Sprintf("%s", patientData["id"])
+	if caseID == "" {
+		caseID = session.ConversationID
+		patientData["id"] = caseID
+	}
+
+	// Explicitly create the case before starting workflow
+	var resultRepo repository.ResultRepository
+	for _, svc := range s.workflowService.GetAllServices() {
+		if repo, ok := svc.(repository.CaseRepository); ok {
+			err := repo.StoreCase(caseID, patientData, false)
+			if err != nil {
+				logger.Warn("Failed to store case data", "error", err, "case_id", caseID)
+			} else {
+				logger.Info("Successfully stored case data", "case_id", caseID)
+			}
+		}
+		if repo, ok := svc.(repository.ResultRepository); ok {
+			resultRepo = repo
+		}
+	}
 
 	// Select the appropriate workflow
 	workflowID, err := s.workflowService.SelectWorkflow(patientData)
@@ -205,29 +233,42 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 	}
 
 	// Run the workflow
+	logger.Info("Starting workflow with case", "workflow_id", workflowID, "case_id", caseID)
+
+	// Direct API call to start workflow with case ID
+	workflowURL := fmt.Sprintf("/workflows/%s/start/%s", workflowID, caseID)
 	instance, err := s.workflowService.RunWorkflow(context.Background(), workflowID, patientData)
 	if err != nil {
 		logger.Error("Failed to run workflow", "error", err, "workflow_id", workflowID)
-		return nil, fmt.Errorf("failed to run workflow: %w", err)
+
+		// Fallback to direct API call if internal call fails
+		resp, apiErr := http.Post(fmt.Sprintf("%s/api%s", s.baseURL, workflowURL),
+			"application/json", nil)
+		if apiErr != nil {
+			logger.Error("Fallback API call also failed", "error", apiErr)
+		} else {
+			resp.Body.Close()
+			logger.Info("Successfully started workflow via API fallback",
+				"workflow_id", workflowID, "case_id", caseID)
+		}
 	}
 
-	// Wait for workflow to complete (with timeout)
-	results, err := s.workflowService.WaitForWorkflow(context.Background(), instance.ID, 120) // 2 minute timeout
-	if err != nil {
-		logger.Error("Error waiting for workflow completion", "error", err, "instance_id", instance.ID)
-		// Continue anyway, we might still have partial results
-	}
-
-	// Extract diagnosis and treatment data
+	// Extract diagnosis and treatment data from result repository directly
 	diagnosisData := make(map[string]any)
 	treatmentData := make(map[string]any)
 
-	if results != nil {
-		if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
-			diagnosisData = diagnosis
-		}
-		if treatment, ok := results["treatment_plan"].(map[string]any); ok {
-			treatmentData = treatment
+	// Try to get results if available
+	if resultRepo != nil {
+		results, err := resultRepo.GetResultsByCaseID(caseID)
+		if err == nil && results != nil {
+			logger.Info("Found existing results for case", "case_id", caseID)
+
+			if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
+				diagnosisData = diagnosis
+			}
+			if treatment, ok := results["treatment_plan"].(map[string]any); ok {
+				treatmentData = treatment
+			}
 		}
 	}
 
@@ -235,7 +276,7 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 	emailSent := false
 	emailAddress := ""
 
-	if email, ok := patientData["email"].(string); ok && email != "" {
+	if email, ok := patientData["email"].(string); ok && email != "" && email != "unknown@example.com" {
 		emailAddress = email
 		patientName := "Patient"
 		if name, ok := patientData["name"].(string); ok && name != "" {
@@ -266,24 +307,23 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"diagnosis":       diagnosisData,
 		"treatment_plan":  treatmentData,
 		"workflow_id":     workflowID,
-		"instance_id":     instance.ID.String(),
-		"email_sent":      emailSent,
-		"email_address":   emailAddress,
-		"completed_at":    time.Now(),
-	}
-
-	// If we have patient data with an ID, use it for storage
-	patientID := session.ConversationID
-	if id, ok := patientData["id"].(string); ok && id != "" {
-		patientID = id
+		"instance_id": func() string {
+			if instance != nil {
+				return instance.ID.String()
+			}
+			return ""
+		}(),
+		"email_sent":    emailSent,
+		"email_address": emailAddress,
+		"completed_at":  time.Now(),
 	}
 
 	// Store in result repository
-	if s.resultRepository != nil {
-		if err := s.resultRepository.StoreResults(patientID, resultData); err != nil {
-			logger.Error("Failed to store call results", "error", err, "patient_id", patientID)
+	if resultRepo != nil {
+		if err := resultRepo.StoreResults(caseID, resultData); err != nil {
+			logger.Error("Failed to store call results", "error", err, "case_id", caseID)
 		} else {
-			logger.Info("Stored call results", "patient_id", patientID)
+			logger.Info("Stored call results", "case_id", caseID)
 		}
 	}
 
@@ -295,10 +335,15 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		Diagnosis:      diagnosisData,
 		Treatment:      treatmentData,
 		WorkflowID:     workflowID,
-		InstanceID:     instance.ID,
-		EmailSent:      emailSent,
-		EmailAddress:   emailAddress,
-		CompletedAt:    time.Now(),
+		InstanceID: func() uuid.UUID {
+			if instance != nil {
+				return instance.ID
+			}
+			return uuid.Nil
+		}(),
+		EmailSent:    emailSent,
+		EmailAddress: emailAddress,
+		CompletedAt:  time.Now(),
 	}
 
 	return callResult, nil

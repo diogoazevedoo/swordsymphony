@@ -74,27 +74,16 @@ func NewConversationManager(aiClient ai.Client, options ...ManagerOption) *Conve
 		aiClient:            aiClient,
 		activeConversations: make(map[string]*Conversation),
 		systemPrompt: `You are an AI medical doctor conducting a phone interview with a patient. 
-Your goal is to gather information in a conversational, empathetic manner while ensuring you collect all necessary medical details.
-Speak naturally and conversationally like a real doctor would, not like a questionnaire. 
-Respond to the patient's concerns and ask logical follow-up questions.
-Try to get: chief complaint, symptom details (onset, duration, severity), medical history, current medications, allergies, and any questions the patient has.
-Be empathetic, professional, and concise in your responses. Never diagnose or prescribe treatment during the call.`,
-		greetingPrompt: `Begin the call by introducing yourself as an AI medical assistant. Say something like: "Hello, I'm Dr. AI from SwordSymphony Medical. I'll be asking you some questions to understand your health concerns better. This call is being recorded to provide you with the best care. May I start by asking your name?" Keep it brief but warm and professional.`,
-		identityPrompt: `Now that you have the patient's name, politely ask for their email address so we can send them a summary of this conversation and any recommendations. Say something like: "Thank you, {{.PatientName}}. Could you please share your email address so we can send you a summary of our conversation afterward?" Be sure to confirm both the name and email address you hear to ensure accuracy.`,
-		symptomsPrompt: `Begin asking about the patient's primary health concern or symptoms. Say something like: "What brings you to our call today? Can you tell me about any symptoms you're experiencing?" Listen carefully to their chief complaint and ask natural follow-up questions about the symptoms such as:
-- When did these symptoms start?
-- How severe are they on a scale of 1-10?
-- Is there anything that makes them better or worse?
-- Have you experienced anything like this before?
-Make this feel like a natural conversation, not an interrogation. Show empathy and understanding.`,
-		historyPrompt: `Now ask about the patient's relevant medical history. Say something like: "To better understand your situation, I'd like to know about your medical history. Do you have any ongoing health conditions or have you had any significant illnesses or surgeries in the past?" Listen carefully and ask appropriate follow-up questions. You should aim to learn about:
-- Any chronic conditions (like diabetes, hypertension, etc.)
-- Previous surgeries or hospitalizations
-- Family history of relevant medical conditions
-Be conversational and tie this to their current symptoms when appropriate.`,
-		medicationPrompt: `Ask about medications and allergies. Say something like: "Are you currently taking any medications, including prescription medications, over-the-counter drugs, or supplements? And do you have any medication allergies I should be aware of?" Make sure to get specific names of medications and dosages if possible, as well as any allergic reactions they've experienced.`,
-		questionsPrompt:  `Give the patient an opportunity to ask questions or share additional information. Say something like: "Before we wrap up, do you have any questions for me or is there anything else about your health that you think would be helpful for me to know?" Listen carefully to their questions/concerns and respond appropriately while setting proper expectations about the AI consultation process.`,
-		closingPrompt:    `Conclude the call professionally. Say something like: "Thank you for sharing all this information with me today. I'm going to send this information to our medical team who will analyze it and send you a detailed summary by email. If you have any urgent concerns, please contact your primary healthcare provider. Is there anything else you need from me before we end our call?"`,
+Be efficient and direct while remaining friendly. Your goal is to quickly gather essential medical information in a conversational way.
+Keep responses under 3 sentences when possible. Ask only one question at a time. Avoid repeating questions.
+Collect: name, email, chief complaint, symptom details, medical history, current medications, and allergies.`,
+		greetingPrompt:   `Briefly introduce yourself as Dr. AI from SwordSymphony Medical. Say you'll ask a few questions about their health. This call is recorded to provide better care. Simply ask for their name. Keep it brief but friendly.`,
+		identityPrompt:   `Thank {{.PatientName}} and ask for their email address only so you can send a summary of your conversation. Confirm what you heard.`,
+		symptomsPrompt:   `Ask what health concern brings them to this call today. Don't list possible symptoms, just ask one clear question about their primary concern.`,
+		historyPrompt:    `Ask if they have any ongoing health conditions or significant past illnesses that might be relevant to their current symptoms. Keep it to one direct question.`,
+		medicationPrompt: `Ask about current medications and allergies in one simple question. Ask for medication names and any known allergies.`,
+		questionsPrompt:  `Ask if they have any questions or if there's anything else about their health they'd like to share.`,
+		closingPrompt:    `Thank them for sharing their information. Let them know you'll send this to the medical team who will analyze it and email them a detailed summary. Ask if there's anything else they need before ending the call.`,
 	}
 
 	for _, option := range options {
@@ -342,7 +331,6 @@ func (m *ConversationManager) analyzePatientMessage(conversationID string, messa
 		contextBuilder.WriteString(fmt.Sprintf("%s: %s\n", prev.Speaker, prev.Text))
 	}
 
-	ctx := contextBuilder.String()
 	logger.Info("Analyzing patient message",
 		"conversation_id", conversationID,
 		"message_text", message.Text,
@@ -353,66 +341,57 @@ func (m *ConversationManager) analyzePatientMessage(conversationID string, messa
 
 	switch status {
 	case StatusGreeting:
-		analysisPrompt = `The patient is introducing themselves. Extract their name if present. 
+		analysisPrompt = `The patient is providing their name. Extract their name.
 Output JSON with the format: {"patient_name": "Name of Patient"}`
 
 	case StatusIdentity:
-		analysisPrompt = `The patient is providing their email address. Extract the email if present.
+		analysisPrompt = `The patient is providing their email address. Extract the email.
 Output JSON with the format: {"patient_email": "email@example.com"}`
 
 	case StatusSymptoms:
-		analysisPrompt = `The patient is describing their symptoms. Extract all symptoms, their duration, severity, and any other relevant details.
+		analysisPrompt = `Extract all symptoms mentioned. Include duration, severity or any details provided.
 Output JSON with the format: {
-  "symptoms": ["symptom1", "symptom2"],
+  "symptoms": ["symptom1 with details", "symptom2 with details"],
   "duration": "duration information",
-  "severity": "severity information",
-  "other_details": "any other relevant information"
+  "severity": "severity information if mentioned"
 }`
 
 	case StatusHistory:
-		analysisPrompt = `The patient is describing their medical history. Extract all medical conditions, previous surgeries, and family history details.
+		analysisPrompt = `Extract all medical conditions and previous surgeries mentioned.
 Output JSON with the format: {
   "medical_conditions": ["condition1", "condition2"],
-  "surgeries": ["surgery1", "surgery2"],
-  "family_history": ["relevant family history details"]
+  "surgeries": ["surgery1", "surgery2"]
 }`
 
 	case StatusMedication:
-		analysisPrompt = `The patient is describing their medications and allergies. Extract all medications, their dosages, and any allergies.
+		analysisPrompt = `Extract all medications and allergies mentioned.
 Output JSON with the format: {
   "medications": ["medication1 and dosage", "medication2 and dosage"],
   "allergies": ["allergy1", "allergy2"]
 }`
 
 	case StatusQuestions:
-		analysisPrompt = `The patient is asking questions or providing additional information. Extract any questions and additional health information.
+		analysisPrompt = `Extract any questions or additional information provided.
 Output JSON with the format: {
-  "questions": ["question1", "question2"],
   "additional_info": "any additional health information"
 }`
 
 	default:
 		analysisPrompt = `Extract any relevant medical information from the patient's message.
-Output JSON with the format: {
-  "information": "extracted information"
-}`
+Output JSON with the format: {"information": "extracted information"}`
 	}
 
 	fullPrompt := fmt.Sprintf(`
-You are an AI medical information extractor. Your task is to analyze the patient's message and extract relevant information.
+Extract only the specific pieces of information from the patient's response.
+Be factual and precise. Only extract information that is clearly stated by the patient.
 
-Previous conversation context:
-%s
-
-Current conversation stage: %s
-
-Patient message: "%s"
+Patient's message: "%s"
 
 %s
-`, ctx, status, message.Text, analysisPrompt)
+`, message.Text, analysisPrompt)
 
 	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
-		MaxTokens:   1024,
+		MaxTokens:   512,
 		Temperature: 0.1,
 		ModelName:   "gpt-3.5-turbo",
 	})
@@ -441,9 +420,13 @@ Patient message: "%s"
 				conversation, exists := m.activeConversations[conversationID]
 				if exists && messageIndex < len(conversation.Transcript) {
 					patientMessage := conversation.Transcript[messageIndex].Text
-					// Simple heuristic: Just use first 30 chars as name if needed
-					if patientMessage != "" {
-						nameToUse := patientMessage
+					// Use a cleaner name extraction
+					words := strings.Fields(patientMessage)
+					if len(words) > 0 {
+						nameToUse := words[0]
+						if len(words) > 1 {
+							nameToUse = strings.Join(words[:2], " ")
+						}
 						if len(nameToUse) > 30 {
 							nameToUse = nameToUse[:30]
 						}
@@ -485,10 +468,15 @@ Patient message: "%s"
 				// Fallback: use the message text as the name
 				patientMessage := conversation.Transcript[messageIndex].Text
 				if patientMessage != "" {
-					conversation.PatientName = patientMessage
-					conversation.CollectedData["patient_name"] = patientMessage
+					nameWords := strings.Fields(patientMessage)
+					nameToUse := patientMessage
+					if len(nameWords) > 0 && len(nameWords) <= 3 {
+						nameToUse = strings.Join(nameWords, " ")
+					}
+					conversation.PatientName = nameToUse
+					conversation.CollectedData["patient_name"] = nameToUse
 					logger.Info("Using message as patient name",
-						"name", patientMessage,
+						"name", nameToUse,
 						"conversation_id", conversationID)
 				}
 			}
@@ -502,23 +490,13 @@ Patient message: "%s"
 					"conversation_id", conversationID)
 			}
 		} else {
+			// For other data, store it directly in CollectedData
 			for key, value := range extractedData {
 				if value != nil {
-					if existingValue, exists := conversation.CollectedData[key]; exists {
-						if existingSlice, ok := existingValue.([]interface{}); ok {
-							if newSlice, ok := value.([]interface{}); ok {
-								conversation.CollectedData[key] = append(existingSlice, newSlice...)
-							} else {
-								conversation.CollectedData[key] = append(existingSlice, value)
-							}
-						} else if newSlice, ok := value.([]interface{}); ok {
-							conversation.CollectedData[key] = append([]interface{}{existingValue}, newSlice...)
-						} else {
-							conversation.CollectedData[key] = []interface{}{existingValue, value}
-						}
-					} else {
-						conversation.CollectedData[key] = value
-					}
+					conversation.CollectedData[key] = value
+					logger.Info("Stored extracted data",
+						"key", key,
+						"conversation_id", conversationID)
 				}
 			}
 		}
@@ -540,10 +518,15 @@ Patient message: "%s"
 			if exists && messageIndex < len(conversation.Transcript) {
 				patientMessage := conversation.Transcript[messageIndex].Text
 				if patientMessage != "" {
-					conversation.PatientName = patientMessage
-					conversation.CollectedData["patient_name"] = patientMessage
+					nameWords := strings.Fields(patientMessage)
+					nameToUse := patientMessage
+					if len(nameWords) > 0 && len(nameWords) <= 3 {
+						nameToUse = strings.Join(nameWords, " ")
+					}
+					conversation.PatientName = nameToUse
+					conversation.CollectedData["patient_name"] = nameToUse
 					logger.Info("Used fallback name extraction after JSON parsing failure",
-						"name", patientMessage,
+						"name", nameToUse,
 						"conversation_id", conversationID)
 				}
 			}
@@ -576,14 +559,14 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 				"conversation_id", conversationID,
 				"patient_name", conversation.PatientName)
 		} else {
-			// Force progression if we've been in greeting stage too long
+			// Force progression after just 2 exchanges
 			greetingCount := 0
 			for _, exchange := range conversation.Transcript {
 				if exchange.Speaker == "ai" {
 					greetingCount++
 				}
 			}
-			if greetingCount >= 3 {
+			if greetingCount >= 2 {
 				// Set a placeholder name if needed
 				if conversation.PatientName == "" {
 					conversation.PatientName = "Patient"
@@ -603,14 +586,14 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 				"conversation_id", conversationID,
 				"patient_email", conversation.PatientEmail)
 		} else {
-			// Force progression if we've been in identity stage too long
+			// Force progression after just 2 exchanges
 			identityCount := 0
 			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
 				if conversation.Transcript[i].Speaker == "ai" &&
 					conversation.Status == StatusIdentity {
 					identityCount++
 				}
-				if identityCount >= 3 {
+				if identityCount >= 2 {
 					// Set a placeholder email if needed
 					if conversation.PatientEmail == "" {
 						conversation.PatientEmail = "unknown@example.com"
@@ -626,96 +609,62 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		}
 
 	case StatusSymptoms:
-		if symptoms, ok := conversation.CollectedData["symptoms"].([]interface{}); ok && len(symptoms) > 0 {
-			symptomsCount := 0
-			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-				if conversation.Transcript[i].Speaker == "ai" &&
-					conversation.Status == StatusSymptoms {
-					symptomsCount++
-				}
-				if symptomsCount >= 3 {
-					conversation.Status = StatusHistory
-					logger.Info("Conversation progressed to history stage",
-						"conversation_id", conversationID,
-						"symptoms_collected", len(symptoms))
-					break
-				}
+		// Progress after just 2 exchanges or if we have symptoms
+		symptomsCount := 0
+		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+			if conversation.Transcript[i].Speaker == "ai" &&
+				conversation.Status == StatusSymptoms {
+				symptomsCount++
+			}
+			if symptomsCount >= 2 {
+				conversation.Status = StatusHistory
+				logger.Info("Conversation progressed to history stage",
+					"conversation_id", conversationID)
+				break
 			}
 		}
 
 	case StatusHistory:
-		if conditions, ok := conversation.CollectedData["medical_conditions"].([]interface{}); ok && len(conditions) > 0 {
-			historyCount := 0
-			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-				if conversation.Transcript[i].Speaker == "ai" &&
-					conversation.Status == StatusHistory {
-					historyCount++
-				}
-				if historyCount >= 2 {
-					conversation.Status = StatusMedication
-					logger.Info("Conversation progressed to medication stage",
-						"conversation_id", conversationID,
-						"conditions_collected", len(conditions))
-					break
-				}
+		// Progress after just 2 exchanges
+		historyCount := 0
+		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+			if conversation.Transcript[i].Speaker == "ai" &&
+				conversation.Status == StatusHistory {
+				historyCount++
 			}
-		} else {
-			// Advance anyway if we've been in history stage for a while
-			historyCount := 0
-			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-				if conversation.Transcript[i].Speaker == "ai" &&
-					conversation.Status == StatusHistory {
-					historyCount++
-				}
-				if historyCount >= 3 {
-					conversation.Status = StatusMedication
-					logger.Info("Forced progression to medication stage",
-						"conversation_id", conversationID)
-					break
-				}
+			if historyCount >= 2 {
+				conversation.Status = StatusMedication
+				logger.Info("Conversation progressed to medication stage",
+					"conversation_id", conversationID)
+				break
 			}
 		}
 
 	case StatusMedication:
-		hasMedications := false
-		if medications, ok := conversation.CollectedData["medications"].([]interface{}); ok {
-			hasMedications = len(medications) > 0
-		}
-		hasAllergies := false
-		if allergies, ok := conversation.CollectedData["allergies"].([]interface{}); ok {
-			hasAllergies = len(allergies) > 0
-		}
-
+		// Progress after just 2 exchanges
 		medicationCount := 0
 		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
 			if conversation.Transcript[i].Speaker == "ai" &&
 				conversation.Status == StatusMedication {
 				medicationCount++
 			}
-			if (hasMedications || hasAllergies) && medicationCount >= 2 {
+			if medicationCount >= 2 {
 				conversation.Status = StatusQuestions
 				logger.Info("Conversation progressed to questions stage",
-					"conversation_id", conversationID,
-					"has_medications", hasMedications,
-					"has_allergies", hasAllergies)
-				break
-			} else if medicationCount >= 3 {
-				// Force progression after 3 exchanges even without data
-				conversation.Status = StatusQuestions
-				logger.Info("Forced progression to questions stage",
 					"conversation_id", conversationID)
 				break
 			}
 		}
 
 	case StatusQuestions:
+		// Progress after 1-2 exchanges
 		questionCount := 0
 		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
 			if conversation.Transcript[i].Speaker == "ai" &&
 				conversation.Status == StatusQuestions {
 				questionCount++
 			}
-			if questionCount >= 2 {
+			if questionCount >= 1 {
 				conversation.Status = StatusClosing
 				logger.Info("Conversation progressed to closing stage",
 					"conversation_id", conversationID)
@@ -724,6 +673,7 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		}
 
 	case StatusClosing:
+		// Complete after one closing message and one patient reply
 		closingDelivered := false
 		patientReplied := false
 
@@ -742,6 +692,74 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 				"conversation_id", conversationID)
 		}
 	}
+}
+
+// GenerateTranscript creates a formatted transcript of the conversation
+func (m *ConversationManager) GenerateTranscript(conversationID string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return "", fmt.Errorf("conversation %s not found", conversationID)
+	}
+
+	var transcript strings.Builder
+	transcript.WriteString(fmt.Sprintf("Conversation Transcript - %s\n", conversation.StartTime.Format("January 2, 2006 at 3:04 PM")))
+	transcript.WriteString(fmt.Sprintf("Patient: %s\n", conversation.PatientName))
+	transcript.WriteString("-----------------------------------------\n\n")
+
+	for _, exchange := range conversation.Transcript {
+		speaker := exchange.Speaker
+		if speaker == "ai" {
+			speaker = "Doctor"
+		} else {
+			speaker = "Patient"
+		}
+		transcript.WriteString(fmt.Sprintf("[%s] %s: %s\n\n",
+			exchange.Timestamp.Format("3:04:05 PM"),
+			speaker,
+			exchange.Text))
+	}
+
+	return transcript.String(), nil
+}
+
+// GetKey retrieves a specific piece of data from the conversation
+func (m *ConversationManager) GetKey(conversationID, key string) (any, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return nil, false
+	}
+
+	value, exists := conversation.CollectedData[key]
+	return value, exists
+}
+
+// SetKey sets a specific piece of data in the conversation
+func (m *ConversationManager) SetKey(conversationID, key string, value any) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return false
+	}
+
+	conversation.CollectedData[key] = value
+	return true
+}
+
+// getMapKeys is a helper function to get keys from a map
+func getMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ProcessConversationData prepares the collected data for external systems
@@ -837,74 +855,6 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 	}
 
 	return processedData, nil
-}
-
-// GenerateTranscript creates a formatted transcript of the conversation
-func (m *ConversationManager) GenerateTranscript(conversationID string) (string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		return "", fmt.Errorf("conversation %s not found", conversationID)
-	}
-
-	var transcript strings.Builder
-	transcript.WriteString(fmt.Sprintf("Conversation Transcript - %s\n", conversation.StartTime.Format("January 2, 2006 at 3:04 PM")))
-	transcript.WriteString(fmt.Sprintf("Patient: %s\n", conversation.PatientName))
-	transcript.WriteString("-----------------------------------------\n\n")
-
-	for _, exchange := range conversation.Transcript {
-		speaker := exchange.Speaker
-		if speaker == "ai" {
-			speaker = "Doctor"
-		} else {
-			speaker = "Patient"
-		}
-		transcript.WriteString(fmt.Sprintf("[%s] %s: %s\n\n",
-			exchange.Timestamp.Format("3:04:05 PM"),
-			speaker,
-			exchange.Text))
-	}
-
-	return transcript.String(), nil
-}
-
-// GetKey retrieves a specific piece of data from the conversation
-func (m *ConversationManager) GetKey(conversationID, key string) (any, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		return nil, false
-	}
-
-	value, exists := conversation.CollectedData[key]
-	return value, exists
-}
-
-// SetKey sets a specific piece of data in the conversation
-func (m *ConversationManager) SetKey(conversationID, key string, value any) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		return false
-	}
-
-	conversation.CollectedData[key] = value
-	return true
-}
-
-// getMapKeys is a helper function to get keys from a map
-func getMapKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // GetConversationMessages retrieves all messages in a conversation

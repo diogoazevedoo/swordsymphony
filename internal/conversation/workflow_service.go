@@ -331,3 +331,20 @@ func extractStringSlice(data map[string]any, key string) []string {
 
 	return []string{}
 }
+
+// GetAllServices returns all services that might be used by the workflow
+func (s *WorkflowService) GetAllServices() []interface{} {
+	services := make([]interface{}, 0)
+
+	// Add the result repository if available
+	if s.workflowEngine != nil {
+		if resultRepo := s.workflowEngine.GetResultRepository(); resultRepo != nil {
+			services = append(services, resultRepo)
+		}
+	}
+
+	// Add the workflow service itself
+	services = append(services, s.workflowService)
+
+	return services
+}

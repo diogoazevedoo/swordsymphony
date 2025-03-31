@@ -466,11 +466,12 @@ func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
 		{"data", "case_id"}, // Nested in data.case_id
 	}
 
+	// First try the direct paths
 	for _, path := range caseIDPaths {
 		if len(path) == 1 {
 			// Try direct key
 			if idVal, ok := patientData[path[0]].(string); ok && idVal != "" {
-				logger.Info("Found case ID using path", "path", path[0], "value", idVal)
+				logger.Info("Found case ID using direct path", "path", path[0], "value", idVal)
 				return idVal
 			}
 		} else if len(path) == 2 {
@@ -484,17 +485,23 @@ func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
 		}
 	}
 
-	// If no ID found, try to log the keys available
-	logger.Warn("Could not find case ID in patient data",
-		"available_keys", getMapKeys(patientData))
-
-	// Final fallback: Try JSON marshaling to inspect structure
-	jsonData, err := json.Marshal(patientData)
-	if err == nil {
-		logger.Debug("Patient data JSON structure", "json", string(jsonData))
+	// If direct ID extraction fails, try using the conversation ID as a fallback
+	if convID, ok := patientData["conversation_id"].(string); ok && convID != "" {
+		logger.Info("Using conversation ID as case ID", "conversation_id", convID)
+		return convID
 	}
 
-	return ""
+	// If there's a name field, use a combination of name and timestamp as ID
+	if name, ok := patientData["name"].(string); ok && name != "" {
+		id := fmt.Sprintf("%s_%d", strings.ReplaceAll(name, " ", "_"), time.Now().Unix())
+		logger.Info("Generated case ID from name", "name", name, "id", id)
+		return id
+	}
+
+	// Last resort - generate a unique ID
+	generatedID := fmt.Sprintf("case_%d", time.Now().UnixNano())
+	logger.Info("Generated fallback case ID", "id", generatedID)
+	return generatedID
 }
 
 // getMapKeys returns a list of keys in a map
