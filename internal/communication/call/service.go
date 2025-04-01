@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -186,28 +185,22 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		return nil, fmt.Errorf("failed to process conversation data: %w", err)
 	}
 
-	// Get patient data
+	// Get patient data and standardize format
 	patientData, ok := processedData["patient_data"].(map[string]any)
 	if !ok {
 		logger.Error("Invalid patient data format", "conversation_id", session.ConversationID)
 		return nil, fmt.Errorf("invalid patient data format")
 	}
 
-	// Standardize the patient data
+	// Standardize the patient data to match demo format exactly
 	patientData = standardizePatientData(patientData)
 
-	// Generate a valid case ID for database storage - make sure it will work with PostgreSQL
-	originalCaseID := fmt.Sprintf("%s", patientData["id"])
-	if originalCaseID == "" {
-		originalCaseID = session.ConversationID
+	// Create a proper case ID using the patient ID
+	caseID := fmt.Sprintf("%v", patientData["id"])
+	if caseID == "" {
+		caseID = fmt.Sprintf("P%d", time.Now().Unix())
+		patientData["id"] = caseID
 	}
-
-	// Create a sanitized case ID for database usage - prefix with case_ and replace problem characters
-	caseID := "case_" + strings.ReplaceAll(session.ConversationID, "-", "_")
-	patientData["id"] = caseID
-	patientData["original_id"] = originalCaseID
-	patientData["case_id"] = caseID
-	patientData["conversation_id"] = session.ConversationID
 
 	// Log the patient data
 	logger.Info("Processed patient data",
@@ -247,9 +240,8 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 
 	// Create input data for the workflow
 	inputData := map[string]any{
-		"patient_data":    patientData,
-		"case_id":         caseID,
-		"conversation_id": session.ConversationID,
+		"patient_data": patientData,
+		"case_id":      caseID,
 	}
 
 	// Initialize UUID for the instance
@@ -305,20 +297,12 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 
 	// Store basic results even if workflow fails
 	resultData := map[string]any{
-		"call_sid":        callSID,
-		"conversation_id": session.ConversationID,
-		"patient_data":    patientData,
-		"workflow_id":     workflowID,
-		"instance_id":     instanceID.String(),
-		"completed_at":    time.Now().Format(time.RFC3339),
-	}
-
-	// Add diagnosis and treatment if available
-	if len(diagnosisData) > 0 {
-		resultData["diagnosis"] = diagnosisData
-	}
-	if len(treatmentData) > 0 {
-		resultData["treatment_plan"] = treatmentData
+		"patient_data":   patientData,
+		"diagnosis":      diagnosisData,
+		"treatment_plan": treatmentData,
+		"workflow_id":    workflowID,
+		"instance_id":    instanceID.String(),
+		"completed_at":   time.Now().Format(time.RFC3339),
 	}
 
 	// Store results
@@ -346,121 +330,113 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 }
 
 func standardizePatientData(data map[string]any) map[string]any {
-	// Ensure we have all the required fields with correct types
-	result := make(map[string]any)
-
-	// Copy all existing data
-	for k, v := range data {
-		result[k] = v
-	}
-
-	// Ensure id exists with P prefix
-	if result["id"] == nil || result["id"] == "" {
-		if id, ok := result["patient_id"].(string); ok && id != "" {
-			result["id"] = id
-		} else {
-			// Generate an ID with P prefix and timestamp
-			result["id"] = fmt.Sprintf("P%d", time.Now().Unix())
-		}
-	} else {
-		// Ensure ID starts with P
-		id := fmt.Sprintf("%v", result["id"])
-		if !strings.HasPrefix(id, "P") {
-			result["id"] = "P" + id
-		}
-	}
-
-	// Ensure basic fields exist
-	ensureField(result, "name", "")
-
-	// Ensure age is a number
-	if result["age"] == nil {
-		result["age"] = float64(0)
-	} else {
-		switch v := result["age"].(type) {
-		case string:
-			age, err := strconv.ParseFloat(v, 64)
-			if err == nil {
-				result["age"] = age
-			} else {
-				result["age"] = float64(0)
-			}
-		case int:
-			result["age"] = float64(v)
-		case float64:
-			// Already correct type
-		default:
-			result["age"] = float64(0)
-		}
-	}
-
-	ensureField(result, "gender", "")
-
-	// Ensure array fields exist and are string arrays
-	ensureStringArrayField(result, "symptoms")
-	ensureStringArrayField(result, "conditions")
-	ensureStringArrayField(result, "medications")
-	ensureStringArrayField(result, "allergies")
-
-	// Ensure vitals map exists with all required fields
-	if result["vitals"] == nil {
-		result["vitals"] = map[string]any{
+	// Create result with exact format matching demo cases
+	result := map[string]any{
+		"id":          "",
+		"name":        "",
+		"age":         0.0,
+		"gender":      "",
+		"symptoms":    []string{},
+		"conditions":  []string{},
+		"medications": []string{},
+		"allergies":   []string{},
+		"vitals": map[string]any{
 			"blood_pressure":    "",
-			"heart_rate":        float64(0),
-			"temperature":       float64(0),
-			"oxygen_saturation": float64(0),
+			"heart_rate":        0.0,
+			"temperature":       0.0,
+			"oxygen_saturation": 0.0,
+		},
+	}
+
+	// If we have an existing ID, use it
+	if id, ok := data["id"].(string); ok && id != "" {
+		result["id"] = id
+	} else if id, ok := data["patient_id"].(string); ok && id != "" {
+		result["id"] = id
+	} else {
+		// Generate a P-prefixed ID
+		result["id"] = fmt.Sprintf("P%d", time.Now().Unix())
+	}
+
+	// Copy name
+	if name, ok := data["name"].(string); ok && name != "" {
+		result["name"] = name
+	} else if name, ok := data["patient_name"].(string); ok && name != "" {
+		result["name"] = name
+	}
+
+	// Copy age, ensuring correct type
+	if age, ok := data["age"].(float64); ok {
+		result["age"] = age
+	} else if age, ok := data["age"].(int); ok {
+		result["age"] = float64(age)
+	} else if ageStr, ok := data["age"].(string); ok {
+		if ageVal, err := strconv.ParseFloat(ageStr, 64); err == nil {
+			result["age"] = ageVal
 		}
-	} else if vitalsMap, ok := result["vitals"].(map[string]any); ok {
-		// Ensure all vital fields exist
-		if _, exists := vitalsMap["blood_pressure"]; !exists {
-			vitalsMap["blood_pressure"] = ""
+	}
+
+	// Copy gender
+	if gender, ok := data["gender"].(string); ok {
+		result["gender"] = gender
+	}
+
+	// Process string array fields
+	copyStringArray(data, "symptoms", result)
+	copyStringArray(data, "conditions", result)
+	copyStringArray(data, "medications", result)
+	copyStringArray(data, "allergies", result)
+
+	// Process vitals
+	vitals := result["vitals"].(map[string]any)
+	if srcVitals, ok := data["vitals"].(map[string]any); ok {
+		// Blood pressure
+		if bp, ok := srcVitals["blood_pressure"].(string); ok && bp != "" {
+			vitals["blood_pressure"] = bp
 		}
-		if _, exists := vitalsMap["heart_rate"]; !exists {
-			vitalsMap["heart_rate"] = float64(0)
-		} else {
-			switch v := vitalsMap["heart_rate"].(type) {
-			case string:
-				hr, err := strconv.ParseFloat(v, 64)
-				if err == nil {
-					vitalsMap["heart_rate"] = hr
-				} else {
-					vitalsMap["heart_rate"] = float64(0)
-				}
-			case int:
-				vitalsMap["heart_rate"] = float64(v)
+
+		// Heart rate
+		if hr, ok := srcVitals["heart_rate"].(float64); ok {
+			vitals["heart_rate"] = hr
+		} else if hr, ok := srcVitals["heart_rate"].(int); ok {
+			vitals["heart_rate"] = float64(hr)
+		} else if hrStr, ok := srcVitals["heart_rate"].(string); ok {
+			if hrVal, err := strconv.ParseFloat(hrStr, 64); err == nil {
+				vitals["heart_rate"] = hrVal
 			}
 		}
-		if _, exists := vitalsMap["temperature"]; !exists {
-			vitalsMap["temperature"] = float64(0)
-		} else {
-			switch v := vitalsMap["temperature"].(type) {
-			case string:
-				temp, err := strconv.ParseFloat(v, 64)
-				if err == nil {
-					vitalsMap["temperature"] = temp
-				} else {
-					vitalsMap["temperature"] = float64(0)
-				}
-			case int:
-				vitalsMap["temperature"] = float64(v)
+
+		// Temperature
+		if temp, ok := srcVitals["temperature"].(float64); ok {
+			vitals["temperature"] = temp
+		} else if temp, ok := srcVitals["temperature"].(int); ok {
+			vitals["temperature"] = float64(temp)
+		} else if tempStr, ok := srcVitals["temperature"].(string); ok {
+			if tempVal, err := strconv.ParseFloat(tempStr, 64); err == nil {
+				vitals["temperature"] = tempVal
 			}
 		}
-		if _, exists := vitalsMap["oxygen_saturation"]; !exists {
-			vitalsMap["oxygen_saturation"] = float64(0)
-		} else {
-			switch v := vitalsMap["oxygen_saturation"].(type) {
-			case string:
-				o2, err := strconv.ParseFloat(v, 64)
-				if err == nil {
-					vitalsMap["oxygen_saturation"] = o2
-				} else {
-					vitalsMap["oxygen_saturation"] = float64(0)
-				}
-			case int:
-				vitalsMap["oxygen_saturation"] = float64(v)
+
+		// Oxygen saturation
+		if o2, ok := srcVitals["oxygen_saturation"].(float64); ok {
+			vitals["oxygen_saturation"] = o2
+		} else if o2, ok := srcVitals["oxygen_saturation"].(int); ok {
+			vitals["oxygen_saturation"] = float64(o2)
+		} else if o2Str, ok := srcVitals["oxygen_saturation"].(string); ok {
+			if o2Val, err := strconv.ParseFloat(o2Str, 64); err == nil {
+				vitals["oxygen_saturation"] = o2Val
 			}
 		}
 	}
+
+	// Save original conversation data if needed but don't expose in main structure
+	if convID, ok := data["conversation_id"].(string); ok {
+		result["_conversation_id"] = convID
+	}
+
+	logger.Info("Standardized patient data",
+		"original_keys", getMapKeys(data),
+		"standardized_keys", getMapKeys(result))
 
 	return result
 }
@@ -957,4 +933,39 @@ func (s *Service) GetLastAIResponse(callSID string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no AI messages found")
+}
+
+func copyStringArray(src map[string]any, field string, dest map[string]any) {
+	if src == nil || dest == nil {
+		return
+	}
+
+	result := []string{}
+
+	// Try to get the field from source
+	if srcVal, ok := src[field]; ok {
+		switch v := srcVal.(type) {
+		case []string:
+			// Direct copy if already string array
+			result = make([]string, len(v))
+			copy(result, v)
+		case []interface{}:
+			// Convert interface array to string array
+			for _, item := range v {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				} else {
+					// Convert any non-string to string
+					result = append(result, fmt.Sprintf("%v", item))
+				}
+			}
+		case string:
+			// Handle single string
+			if v != "" {
+				result = []string{v}
+			}
+		}
+	}
+
+	dest[field] = result
 }
