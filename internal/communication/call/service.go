@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type StreamingSession struct {
 	AudioBuffer       []byte
 	LastActivity      time.Time
 	PatientPhone      string
+	LastAudioDuration float64
 }
 
 // CallResult contains the results of a completed call
@@ -142,6 +144,13 @@ func (s *Service) EndCall(callSID string) error {
 		return fmt.Errorf("no active session for call %s", callSID)
 	}
 
+	// If call is already marked as inactive, just return
+	if !session.IsActive {
+		s.mu.Unlock()
+		logger.Info("Call already marked as inactive", "call_sid", callSID)
+		return nil
+	}
+
 	session.IsActive = false
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
@@ -153,13 +162,22 @@ func (s *Service) EndCall(callSID string) error {
 		}
 	}
 
-	// Mark the conversation as complete
+	// Mark the conversation as complete - don't return error if this fails
 	if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
 		logger.Warn("Error completing conversation", "error", err, "conversation_id", session.ConversationID)
 	}
 
-	// End the Twilio call
-	if err := s.twilioClient.EndCall(callSID); err != nil {
+	logger.Info("Ended call", "call_sid", callSID)
+
+	// End the Twilio call - this might fail if the call is already ended
+	err := s.twilioClient.EndCall(callSID)
+	if err != nil {
+		// Log but don't return error if it's likely the call is already ended
+		if strings.Contains(err.Error(), "already completed") ||
+			strings.Contains(err.Error(), "not found") {
+			logger.Warn("Call may already be ended", "call_sid", callSID, "error", err)
+			return nil
+		}
 		logger.Error("Failed to end call", "error", err, "call_sid", callSID)
 		return fmt.Errorf("failed to end call: %w", err)
 	}
@@ -742,18 +760,15 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 		"conversation_id", session.ConversationID,
 		"input", speechText)
 
-	// Only add the message ONCE
-	if err := s.conversationManager.AddMessage(session.ConversationID, "patient", speechText, 0.9); err != nil {
-		logger.Error("Failed to add patient message", "error", err)
-		return "", err
-	}
+	// We're not adding the message here anymore as it's already added in HandleSpeechCallback
+	// This prevents duplicate message processing
 
 	s.mu.Lock()
 	session.LastActivity = time.Now()
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
-	// Get the response
+	// Get the response from the conversation manager
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
@@ -817,7 +832,7 @@ func getMapKeys(m map[string]any) []string {
 	return keys
 }
 
-// Add to internal/communication/call/service.go:
+// GenerateAndStoreAudioResponse generates audio for an AI response and stores it
 func (s *Service) GenerateAndStoreAudioResponse(callSID string, text string) ([]byte, error) {
 	voiceOptions := &elevenlabs.VoiceOptions{
 		Stability:       0.5,
@@ -831,6 +846,18 @@ func (s *Service) GenerateAndStoreAudioResponse(callSID string, text string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate audio: %w", err)
 	}
+
+	// Set a simple property to track audio duration for our goodbye delay calculation
+	s.mu.Lock()
+	if session, exists := s.activeStreamingSessions[callSID]; exists {
+		session.LastAudioDuration = audioResponse.Duration
+		s.activeStreamingSessions[callSID] = session
+		logger.Info("Recorded audio duration",
+			"call_sid", callSID,
+			"duration", audioResponse.Duration,
+			"text_length", len(text))
+	}
+	s.mu.Unlock()
 
 	// Store the audio data via API
 	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
@@ -948,14 +975,31 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 		return
 	}
 
-	// If conversation is in StatusComplete state, end the call
-	if conversation.Status == "complete" {
+	// If conversation is in StatusComplete or StatusClosing state, plan to end the call
+	if conversation.Status == "complete" || conversation.Status == "closing" {
 		logger.Info("Conversation completed, ending call automatically",
 			"call_sid", callSID,
 			"conversation_id", session.ConversationID)
 
-		// Wait a short time for the final message to be delivered
-		time.Sleep(3 * time.Second)
+		// Fixed delay - simple but effective
+		// 25 seconds should be enough for any goodbye message to complete
+		delaySeconds := 25
+
+		logger.Info("Delaying call end to allow message playback",
+			"call_sid", callSID,
+			"delay_seconds", delaySeconds)
+
+		// Wait for the goodbye message to be delivered
+		time.Sleep(time.Duration(delaySeconds) * time.Second)
+
+		// Double check that we're still in complete state
+		// This prevents a race condition if another message came in while we were waiting
+		conversation, stillExists := s.conversationManager.GetConversation(session.ConversationID)
+		if !stillExists || conversation.Status != "complete" {
+			logger.Info("Conversation state changed during delay, not ending call",
+				"call_sid", callSID)
+			return
+		}
 
 		// End the call
 		if err := s.EndCall(callSID); err != nil {

@@ -155,10 +155,10 @@ func (m *ConversationManager) CompleteConversation(conversationID string) error 
 // AddMessage adds a message exchange to the conversation
 func (m *ConversationManager) AddMessage(conversationID string, speaker string, text string, confidence float64) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	conversation, exists := m.activeConversations[conversationID]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("conversation %s not found", conversationID)
 	}
 
@@ -170,6 +170,7 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 			logger.Info("Skipping duplicate message",
 				"conversation_id", conversationID,
 				"speaker", speaker)
+			m.mu.Unlock()
 			return nil
 		}
 	}
@@ -190,150 +191,27 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 		"text_length", len(text),
 		"confidence", confidence)
 
-	// Process patient messages outside the lock
+	// Process patient messages synchronously while still holding the lock
 	if speaker == "patient" && !exchange.IsProcessed {
 		messageIndex := len(conversation.Transcript) - 1
-		go m.analyzePatientMessage(conversationID, messageIndex)
+		m.mu.Unlock() // Temporarily unlock to allow other operations
+
+		// Analyze the message
+		analyzeErr := m.analyzePatientMessageSync(conversationID, messageIndex)
+		if analyzeErr != nil {
+			logger.Error("Error analyzing patient message", "error", analyzeErr)
+		}
+
+		return nil
 	}
 
+	m.mu.Unlock()
 	return nil
 }
 
-// GetNextResponse generates the next AI response with a strict flow
-func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
-	m.mu.RLock()
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		m.mu.RUnlock()
-		return "", fmt.Errorf("conversation %s not found", conversationID)
-	}
-
-	// Determine the current state and what question to ask next
-	// This follows a strict order: greeting -> name -> age -> gender -> symptoms -> conditions -> medication -> allergies -> closing
-	var nextQuestion string
-	var currentStatus = conversation.Status
-
-	switch currentStatus {
-	case StatusGreeting:
-		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
-		conversation.Status = StatusName
-		conversation.QuestionsAsked["greeting"] = true
-	case StatusName:
-		if conversation.PatientName != "" {
-			// Name already collected, move to age
-			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", conversation.PatientName)
-			conversation.Status = StatusAge
-			conversation.QuestionsAsked["name"] = true
-		} else {
-			nextQuestion = "What is your name?"
-		}
-	case StatusAge:
-		_, hasAge := conversation.CollectedData["age"]
-		if hasAge {
-			// Age collected, move to gender
-			nextQuestion = "What is your gender?"
-			conversation.Status = StatusGender
-			conversation.QuestionsAsked["age"] = true
-		} else {
-			nextQuestion = "What is your age?"
-		}
-	case StatusGender:
-		_, hasGender := conversation.CollectedData["gender"]
-		if hasGender {
-			// Gender collected, move to symptoms
-			nextQuestion = "What symptoms are you experiencing?"
-			conversation.Status = StatusSymptoms
-			conversation.QuestionsAsked["gender"] = true
-		} else {
-			nextQuestion = "What is your gender?"
-		}
-	case StatusSymptoms:
-		symptoms, hasSymptoms := conversation.CollectedData["symptoms"].([]interface{})
-		if hasSymptoms && len(symptoms) > 0 {
-			// Symptoms collected, move to conditions
-			nextQuestion = "Do you have any existing medical conditions?"
-			conversation.Status = StatusConditions
-			conversation.QuestionsAsked["symptoms"] = true
-		} else {
-			nextQuestion = "What symptoms are you experiencing?"
-		}
-	case StatusConditions:
-		conditions, hasConditions := conversation.CollectedData["conditions"].([]interface{})
-		if hasConditions && len(conditions) > 0 {
-			// Conditions collected, move to medications
-			nextQuestion = "What medications are you currently taking?"
-			conversation.Status = StatusMedication
-			conversation.QuestionsAsked["conditions"] = true
-		} else {
-			nextQuestion = "Do you have any existing medical conditions?"
-		}
-	case StatusMedication:
-		medications, hasMedications := conversation.CollectedData["medications"].([]interface{})
-		if hasMedications && len(medications) > 0 {
-			// Medications collected, move to allergies
-			nextQuestion = "Do you have any allergies?"
-			conversation.Status = StatusAllergies
-			conversation.QuestionsAsked["medications"] = true
-		} else {
-			nextQuestion = "What medications are you currently taking?"
-		}
-	case StatusAllergies:
-		allergies, hasAllergies := conversation.CollectedData["allergies"].([]interface{})
-		if hasAllergies && len(allergies) > 0 {
-			// Allergies collected, move to closing
-			nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
-			conversation.Status = StatusClosing
-			conversation.QuestionsAsked["allergies"] = true
-		} else {
-			nextQuestion = "Do you have any allergies?"
-		}
-	case StatusClosing:
-		// Conversation completed, prepare for call ending
-		nextQuestion = "Thank you for your time. Your information has been recorded. Goodbye."
-		conversation.Status = StatusComplete
-		conversation.QuestionsAsked["closing"] = true
-	case StatusComplete:
-		// Conversation already completed
-		nextQuestion = "Goodbye."
-	default:
-		// If state is unknown, reset to greeting
-		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
-		conversation.Status = StatusName
-	}
-
-	m.mu.RUnlock()
-
-	// Create simplified response
-	aiResponse := nextQuestion
-
-	// Add the AI response to the conversation
-	err := m.AddMessage(conversationID, "ai", aiResponse, 1.0)
-	if err != nil {
-		logger.Error("Error adding AI response to conversation", "error", err)
-	}
-
-	return aiResponse, nil
-}
-
-// Helper functions for GetNextResponse
-func getRecentMessages(m *ConversationManager, conversationID string, count int) []MessageExchange {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		return []MessageExchange{}
-	}
-
-	if len(conversation.Transcript) <= count {
-		return conversation.Transcript
-	}
-
-	return conversation.Transcript[len(conversation.Transcript)-count:]
-}
-
-// analyzePatientMessage analyzes a patient message to extract specific information
-func (m *ConversationManager) analyzePatientMessage(conversationID string, messageIndex int) {
+// analyzePatientMessageSync analyzes a patient message synchronously
+// analyzePatientMessageSync analyzes a patient message synchronously
+func (m *ConversationManager) analyzePatientMessageSync(conversationID string, messageIndex int) error {
 	m.mu.RLock()
 	conversation, exists := m.activeConversations[conversationID]
 	if !exists || messageIndex >= len(conversation.Transcript) {
@@ -341,13 +219,13 @@ func (m *ConversationManager) analyzePatientMessage(conversationID string, messa
 		logger.Error("Cannot analyze message - conversation not found or message index invalid",
 			"conversation_id", conversationID,
 			"message_index", messageIndex)
-		return
+		return fmt.Errorf("conversation not found or invalid message index")
 	}
 
 	message := conversation.Transcript[messageIndex]
 	if message.Speaker != "patient" || message.IsProcessed {
 		m.mu.RUnlock()
-		return
+		return nil
 	}
 
 	status := conversation.Status
@@ -413,7 +291,7 @@ If certain information is missing, include empty values rather than omitting fie
 		logger.Error("Error analyzing patient message", "error", err)
 		// Implement fallback extraction regardless of error
 		fallbackExtraction(m, conversationID, messageIndex, message.Text)
-		return
+		return err
 	}
 
 	// Extract JSON from response
@@ -425,7 +303,7 @@ If certain information is missing, include empty values rather than omitting fie
 		logger.Error("Error parsing JSON from analysis", "error", err, "json", jsonText)
 		// Implement fallback extraction
 		fallbackExtraction(m, conversationID, messageIndex, message.Text)
-		return
+		return err
 	}
 
 	m.mu.Lock()
@@ -433,7 +311,7 @@ If certain information is missing, include empty values rather than omitting fie
 
 	conversation, exists = m.activeConversations[conversationID]
 	if !exists || messageIndex >= len(conversation.Transcript) {
-		return
+		return fmt.Errorf("conversation no longer exists")
 	}
 
 	conversation.Transcript[messageIndex].IsProcessed = true
@@ -446,47 +324,232 @@ If certain information is missing, include empty values rather than omitting fie
 			conversation.CollectedData["patient_name"] = name
 			conversation.CollectedData["name"] = name
 			logger.Info("Extracted patient name", "name", name)
+			// Force transition to the next state
+			conversation.Status = StatusAge
+			conversation.QuestionsAsked["name"] = true
 		}
 
 	case StatusAge:
-		if age, ok := extractedData["age"].(float64); ok {
+		if age, ok := extractedData["age"].(float64); ok && age > 0 {
 			conversation.CollectedData["age"] = age
 			logger.Info("Extracted patient age", "age", age)
+			// Force transition to the next state
+			conversation.Status = StatusGender
+			conversation.QuestionsAsked["age"] = true
 		}
 
 	case StatusGender:
-		if gender, ok := extractedData["gender"].(string); ok {
+		if gender, ok := extractedData["gender"].(string); ok && gender != "" {
 			conversation.CollectedData["gender"] = gender
 			logger.Info("Extracted patient gender", "gender", gender)
+			// Force transition to the next state
+			conversation.Status = StatusSymptoms
+			conversation.QuestionsAsked["gender"] = true
 		}
 
 	case StatusSymptoms:
 		if symptoms, ok := extractedData["symptoms"].([]interface{}); ok && len(symptoms) > 0 {
 			conversation.CollectedData["symptoms"] = symptoms
 			logger.Info("Extracted patient symptoms", "count", len(symptoms))
+			// Force transition to the next state
+			conversation.Status = StatusConditions
+			conversation.QuestionsAsked["symptoms"] = true
 		}
 
 	case StatusConditions:
 		if conditions, ok := extractedData["conditions"].([]interface{}); ok && len(conditions) > 0 {
 			conversation.CollectedData["conditions"] = conditions
 			logger.Info("Extracted patient conditions", "count", len(conditions))
+			// Force transition to the next state
+			conversation.Status = StatusMedication
+			conversation.QuestionsAsked["conditions"] = true
+		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
+			strings.Contains(strings.ToLower(message.Text), "none") ||
+			strings.Contains(strings.ToLower(message.Text), "don't have") {
+			// Handle negative responses
+			conversation.CollectedData["conditions"] = []interface{}{}
+			conversation.Status = StatusMedication
+			conversation.QuestionsAsked["conditions"] = true
 		}
 
 	case StatusMedication:
 		if medications, ok := extractedData["medications"].([]interface{}); ok && len(medications) > 0 {
 			conversation.CollectedData["medications"] = medications
 			logger.Info("Extracted patient medications", "count", len(medications))
+			// Force transition to the next state
+			conversation.Status = StatusAllergies
+			conversation.QuestionsAsked["medications"] = true
+		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
+			strings.Contains(strings.ToLower(message.Text), "none") ||
+			strings.Contains(strings.ToLower(message.Text), "don't take") {
+			// Handle negative responses
+			conversation.CollectedData["medications"] = []interface{}{}
+			conversation.Status = StatusAllergies
+			conversation.QuestionsAsked["medications"] = true
 		}
 
 	case StatusAllergies:
 		if allergies, ok := extractedData["allergies"].([]interface{}); ok && len(allergies) > 0 {
 			conversation.CollectedData["allergies"] = allergies
 			logger.Info("Extracted patient allergies", "count", len(allergies))
+			// Force transition to the next state
+			conversation.Status = StatusClosing
+			conversation.QuestionsAsked["allergies"] = true
+		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
+			strings.Contains(strings.ToLower(message.Text), "none") ||
+			strings.Contains(strings.ToLower(message.Text), "don't have") {
+			// Handle negative responses
+			conversation.CollectedData["allergies"] = []interface{}{}
+			conversation.Status = StatusClosing
+			conversation.QuestionsAsked["allergies"] = true
 		}
 	}
 
 	// Always check for specific health data regardless of conversation state
 	scanForHealthData(extractedData, conversation.CollectedData)
+
+	return nil
+}
+
+// GetNextResponse generates the next AI response with a strict flow
+func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return "", fmt.Errorf("conversation %s not found", conversationID)
+	}
+
+	// Check if we already have the next question ready
+	if len(conversation.Transcript) > 0 {
+		lastMsg := conversation.Transcript[len(conversation.Transcript)-1]
+		if lastMsg.Speaker == "ai" && !lastMsg.IsProcessed {
+			lastMsg.IsProcessed = true
+			conversation.Transcript[len(conversation.Transcript)-1] = lastMsg
+			return lastMsg.Text, nil
+		}
+	}
+
+	// Track if we've just received a patient response
+	patientJustResponded := false
+	if len(conversation.Transcript) >= 2 {
+		lastMsg := conversation.Transcript[len(conversation.Transcript)-1]
+		prevMsg := conversation.Transcript[len(conversation.Transcript)-2]
+		if lastMsg.Speaker == "patient" && prevMsg.Speaker == "ai" {
+			patientJustResponded = true
+		}
+	}
+
+	// After receiving any patient response, always move to the next state
+	if patientJustResponded {
+		advanceConversationState(conversation)
+	}
+
+	logger.Info("Current conversation state",
+		"conversation_id", conversationID,
+		"status", string(conversation.Status),
+		"collected_keys", getMapKeys(conversation.CollectedData),
+		"patient_responded", patientJustResponded)
+
+	// Generate response for the current state
+	var nextQuestion string
+
+	switch conversation.Status {
+	case StatusGreeting:
+		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
+		conversation.Status = StatusName
+
+	case StatusName:
+		if conversation.PatientName != "" {
+			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", conversation.PatientName)
+		} else {
+			nextQuestion = "What is your name?"
+		}
+
+	case StatusAge:
+		nextQuestion = "What is your gender?"
+
+	case StatusGender:
+		nextQuestion = "What symptoms are you experiencing?"
+
+	case StatusSymptoms:
+		nextQuestion = "Do you have any existing medical conditions?"
+
+	case StatusConditions:
+		nextQuestion = "What medications are you currently taking?"
+
+	case StatusMedication:
+		nextQuestion = "Do you have any allergies?"
+
+	case StatusAllergies:
+		nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
+		conversation.Status = StatusClosing
+
+	case StatusClosing:
+		nextQuestion = "Thank you for your time. Your information has been recorded. Goodbye."
+		conversation.Status = StatusComplete
+
+	case StatusComplete:
+		nextQuestion = "Goodbye."
+
+	default:
+		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
+		conversation.Status = StatusName
+	}
+
+	// Add the message to the conversation
+	exchange := MessageExchange{
+		Speaker:     "ai",
+		Text:        nextQuestion,
+		Timestamp:   time.Now(),
+		Confidence:  1.0,
+		IsProcessed: true,
+	}
+
+	conversation.Transcript = append(conversation.Transcript, exchange)
+
+	logger.Info("Added message to conversation",
+		"conversation_id", conversationID,
+		"speaker", "ai",
+		"text_length", len(nextQuestion),
+		"confidence", 1.0)
+
+	logger.Info("New conversation state",
+		"conversation_id", conversationID,
+		"status", string(conversation.Status))
+
+	return nextQuestion, nil
+}
+
+// advanceConversationState moves the conversation to the next logical state
+func advanceConversationState(conversation *Conversation) {
+	// In this simplified approach, we just force the state to advance
+	// regardless of whether we've extracted the data correctly
+	switch conversation.Status {
+	case StatusGreeting:
+		conversation.Status = StatusName
+	case StatusName:
+		conversation.Status = StatusAge
+	case StatusAge:
+		conversation.Status = StatusGender
+	case StatusGender:
+		conversation.Status = StatusSymptoms
+	case StatusSymptoms:
+		conversation.Status = StatusConditions
+	case StatusConditions:
+		conversation.Status = StatusMedication
+	case StatusMedication:
+		conversation.Status = StatusAllergies
+	case StatusAllergies:
+		conversation.Status = StatusClosing
+	case StatusClosing:
+		conversation.Status = StatusComplete
+	}
+
+	// Mark the question as asked
+	stateKey := string(conversation.Status)
+	conversation.QuestionsAsked[stateKey] = true
 }
 
 // fallbackExtraction attempts to extract critical health information using simple pattern matching

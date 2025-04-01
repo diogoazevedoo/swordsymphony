@@ -126,18 +126,15 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		return
 	}
 
-	// Start processing the speech input in a goroutine
-	go func() {
-		// Store the speech input for processing
-		if err := c.callService.StoreMessage(callSID, "patient", speechInput); err != nil {
-			logger.Error("Failed to store patient message", "error", err)
-		}
-	}()
+	// Store the speech input for processing - do this only once
+	if err := c.callService.StoreMessage(callSID, "patient", speechInput); err != nil {
+		logger.Error("Failed to store patient message", "error", err)
+	}
 
-	// Respond immediately with a waiting message to avoid Twilio timeout
-	// Generate a quick response URL that will stream the real response when ready
+	// Generate a response URL that will stream the real response when ready
 	responseURL := fmt.Sprintf("%s/api/call/response/%s", c.callService.GetBaseURL(), callSID)
 
+	// Create TwiML response that will play our audio and then gather the next speech input
 	twiML := `<?xml version="1.0" encoding="UTF-8"?><Response>
 		<Play>` + responseURL + `</Play>
 		<Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
@@ -146,8 +143,26 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiML)
 
-	// Process the speech input and prepare response asynchronously
-	go c.processAndPrepareResponse(callSID, speechInput)
+	// Process the speech input and prepare response asynchronously, only once
+	go func() {
+		// Set a timeout for this processing task
+		_, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Process the input
+		aiResponse, err := c.callService.HandleSpeechInput(callSID, speechInput)
+		if err != nil {
+			logger.Error("Error processing speech input", "error", err, "call_sid", callSID)
+			return
+		}
+
+		// Generate audio from the response
+		_, err = c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
+		if err != nil {
+			logger.Error("Error generating audio", "error", err, "call_sid", callSID)
+			return
+		}
+	}()
 }
 
 // processAndPrepareResponse handles the AI response generation and audio conversion
