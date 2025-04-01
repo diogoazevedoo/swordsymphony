@@ -734,7 +734,7 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 
 	if !exists {
 		logger.Error("No active session for call", "call_sid", callSID)
-		// Recovery logic remains the same...
+		return "I'm sorry, I can't process your request right now.", nil
 	}
 
 	logger.Info("Processing speech input",
@@ -753,7 +753,7 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
-	// Get JUST ONE response
+	// Get the response
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
@@ -763,6 +763,9 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 	logger.Info("Successfully generated AI response",
 		"call_sid", callSID,
 		"response_length", len(aiResponse))
+
+	// Check if conversation is complete
+	go s.CheckConversationCompletion(callSID)
 
 	return aiResponse, nil
 }
@@ -925,4 +928,40 @@ func copyStringArray(src map[string]any, field string, dest map[string]any) {
 	}
 
 	dest[field] = result
+}
+
+// CheckConversationCompletion checks if the conversation is complete and ends the call if necessary
+func (s *Service) CheckConversationCompletion(callSID string) {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		logger.Warn("No session found for call", "call_sid", callSID)
+		return
+	}
+
+	// Get the conversation
+	conversation, ok := s.conversationManager.GetConversation(session.ConversationID)
+	if !ok {
+		logger.Error("Failed to get conversation", "error")
+		return
+	}
+
+	// If conversation is in StatusComplete state, end the call
+	if conversation.Status == "complete" {
+		logger.Info("Conversation completed, ending call automatically",
+			"call_sid", callSID,
+			"conversation_id", session.ConversationID)
+
+		// Wait a short time for the final message to be delivered
+		time.Sleep(3 * time.Second)
+
+		// End the call
+		if err := s.EndCall(callSID); err != nil {
+			logger.Error("Failed to automatically end call", "error", err, "call_sid", callSID)
+		} else {
+			logger.Info("Call ended automatically", "call_sid", callSID)
+		}
+	}
 }
