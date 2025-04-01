@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
@@ -36,26 +37,58 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		"case_id", caseID,
 		"result_keys", getMapKeys(results))
 
-	// Start a transaction with elevated isolation level
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Check if the case exists first
+	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
-	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted,
-	})
+	var caseExists bool
+	checkQuery := `SELECT EXISTS(SELECT 1 FROM cases WHERE id = $1)`
+	err := r.db.QueryRowContext(ctx, checkQuery, caseID).Scan(&caseExists)
+
 	if err != nil {
-		logger.Error("Failed to begin transaction", "error", err)
-		return errors.External(err, "Failed to begin transaction", "db_transaction_error")
+		logger.Error("Error checking if case exists", "case_id", caseID, "error", err)
+	} else if !caseExists {
+		// Try to create the case if it doesn't exist and we have patient data
+		if patientData, ok := results["patient_data"].(map[string]any); ok {
+			logger.Info("Case doesn't exist, attempting to create it", "case_id", caseID)
+
+			// Create the case
+			patientDataJSON, err := json.Marshal(patientData)
+			if err != nil {
+				logger.Error("Failed to marshal patient data", "error", err)
+				return errors.External(err, "Failed to marshal patient data", "json_marshal_error")
+			}
+
+			insertCaseQuery := `
+				INSERT INTO cases (id, data, is_demo, created_at, updated_at)
+				VALUES ($1, $2, false, NOW(), NOW())
+				ON CONFLICT (id) DO NOTHING
+			`
+
+			_, err = r.db.ExecContext(ctx, insertCaseQuery, caseID, patientDataJSON)
+			if err != nil {
+				logger.Error("Failed to create case", "error", err)
+				return errors.External(err, "Failed to create case for results", "case_creation_failed")
+			}
+
+			logger.Info("Created case for results", "case_id", caseID)
+		} else {
+			logger.Error("Case doesn't exist and no patient data provided", "case_id", caseID)
+			return errors.External(fmt.Errorf("case %s doesn't exist", caseID),
+				"Failed to store results - case doesn't exist", "case_not_found")
+		}
 	}
-	defer tx.Rollback()
 
 	// Retrieve existing data if any
 	existingDataJSON := []byte("{}")
 	var existingData map[string]any
 
 	var existingID int
-	checkQuery := `SELECT id, data FROM results WHERE case_id = $1`
-	err = tx.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID, &existingDataJSON)
+	ctx, cancel = withTimeout(defaultQueryTimeout)
+	defer cancel()
+
+	checkQuery = `SELECT id, data FROM results WHERE case_id = $1`
+	err = r.db.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID, &existingDataJSON)
 
 	if err == nil {
 		// We have existing data, parse it
@@ -82,7 +115,7 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 			SET data = $1, updated_at = NOW()
 			WHERE case_id = $2
 		`
-		_, err = tx.ExecContext(ctx, updateQuery, dataJSON, caseID)
+		_, err = r.db.ExecContext(ctx, updateQuery, dataJSON, caseID)
 		if err != nil {
 			logger.Error("Failed to update results", "error", err)
 			return errors.External(err, "Failed to update results", "db_update_error")
@@ -99,7 +132,10 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 			INSERT INTO results (case_id, data, created_at, updated_at)
 			VALUES ($1, $2, NOW(), NOW())
 		`
-		_, err = tx.ExecContext(ctx, insertQuery, caseID, dataJSON)
+		ctx, cancel = withTimeout(defaultTxTimeout)
+		defer cancel()
+
+		_, err = r.db.ExecContext(ctx, insertQuery, caseID, dataJSON)
 		if err != nil {
 			logger.Error("Failed to insert results", "error", err, "query", insertQuery)
 			return errors.External(err, "Failed to insert results", "db_insert_error")
@@ -108,12 +144,6 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		// Unexpected error when checking for existing data
 		logger.Error("Failed to check for existing data", "error", err)
 		return errors.External(err, "Failed to check existing results", "db_check_error")
-	}
-
-	// Commit the transaction
-	if err := tx.Commit(); err != nil {
-		logger.Error("Failed to commit transaction", "error", err)
-		return errors.External(err, "Failed to commit transaction", "db_commit_error")
 	}
 
 	logger.Info("Successfully stored results in PostgreSQL",

@@ -487,13 +487,18 @@ func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
 
 	// If direct ID extraction fails, try using the conversation ID as a fallback
 	if convID, ok := patientData["conversation_id"].(string); ok && convID != "" {
-		logger.Info("Using conversation ID as case ID", "conversation_id", convID)
-		return convID
+		// Make it database-friendly by adding a prefix
+		caseID := "case_" + convID
+		logger.Info("Using conversation ID as case ID", "conversation_id", convID, "case_id", caseID)
+		return caseID
 	}
 
 	// If there's a name field, use a combination of name and timestamp as ID
 	if name, ok := patientData["name"].(string); ok && name != "" {
-		id := fmt.Sprintf("%s_%d", strings.ReplaceAll(name, " ", "_"), time.Now().Unix())
+		sanitizedName := strings.ReplaceAll(name, " ", "_")
+		sanitizedName = strings.ReplaceAll(sanitizedName, "'", "")
+		sanitizedName = strings.ReplaceAll(sanitizedName, ".", "")
+		id := fmt.Sprintf("case_%s_%d", sanitizedName, time.Now().Unix())
 		logger.Info("Generated case ID from name", "name", name, "id", id)
 		return id
 	}

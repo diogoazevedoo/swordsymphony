@@ -68,57 +68,30 @@ type ConversationManager struct {
 // ManagerOption configures a conversation manager
 type ManagerOption func(*ConversationManager)
 
-// NewConversationManager creates a new conversation manager with improved prompts
+// NewConversationManager creates a new conversation manager with direct, focused prompts
 func NewConversationManager(aiClient ai.Client, options ...ManagerOption) *ConversationManager {
 	manager := &ConversationManager{
 		aiClient:            aiClient,
 		activeConversations: make(map[string]*Conversation),
-		systemPrompt: `You are an AI medical doctor conducting a phone interview with a patient. 
-Be efficient, direct, and professional while remaining warm and empathetic. 
-Your goal is to quickly gather essential medical information in a conversational way.
-Keep responses under 3 sentences when possible. 
-Ask only ONE question at a time. 
-Never repeat questions that have already been asked or answered.
-Listen carefully to patient responses and adjust follow-up questions accordingly.
-Always keep track of what information you've already gathered.`,
+		systemPrompt: `You are a medical assistant gathering basic information for a patient record.
+Be friendly but EXTREMELY concise. Your goal is ONLY to collect specific required information.
+Keep each response under 20 words when possible. Ask exactly ONE question at a time.
+NEVER repeat questions you've already asked.
+Do not provide any diagnosis or medical advice.`,
 
-		// Clear, direct greeting that sets expectations
-		greetingPrompt: `Briefly introduce yourself as Dr. AI from SwordSymphony Medical. 
-Say you're going to ask a few quick questions about the patient's health. 
-Mention the call is being recorded to provide better care.
-Ask ONLY for their name - nothing else in this first exchange.
-Keep it brief but warm.`,
+		greetingPrompt: `Briefly say hello and ask for the patient's name only.`,
 
-		// Get email for follow-up
-		identityPrompt: `Thank {{.PatientName}} for sharing their name.
-Ask ONLY for their email address so you can send a summary of the conversation.
-Keep it brief and only ask this single question.`,
+		identityPrompt: `Simply ask "What is your age and gender?" No other questions.`,
 
-		// Focus on primary concern
-		symptomsPrompt: `Ask what specific health concern brings them to this call today.
-Focus only on their primary symptoms in this question.
-Don't list possible symptoms or suggest answers - just ask one clear, open-ended question.`,
+		symptomsPrompt: `Ask "What symptoms are you experiencing right now?" Nothing else.`,
 
-		// Get medical history
-		historyPrompt: `Ask if they have any ongoing medical conditions or significant past medical history.
-Keep it to a single, direct question focused only on their medical history.
-Do not ask about medications or allergies yet - that will be your next question.`,
+		historyPrompt: `Ask "Do you have any existing medical conditions?" Keep it short.`,
 
-		// Get medications and allergies
-		medicationPrompt: `Ask about what medications they're currently taking and if they have any known drug allergies.
-Ask this as a single question about both medications and allergies.
-Be brief and direct.`,
+		medicationPrompt: `Ask "What medications are you taking, and do you have any allergies?"`,
 
-		// Allow for additional information
-		questionsPrompt: `Ask if there's anything else about their health concerns they'd like to share,
-or if they have any questions before ending the call.
-Keep it brief and open-ended.`,
+		questionsPrompt: `Ask "Is there anything else important about your health I should know?"`,
 
-		// Clear closing
-		closingPrompt: `Thank them for sharing their information.
-Let them know you'll send a summary to their email with an initial assessment.
-Briefly explain that a medical team will review their case and follow up if needed.
-End with a polite goodbye.`,
+		closingPrompt: `Say "Thank you for the information" and end the call politely.`,
 	}
 
 	for _, option := range options {
@@ -255,236 +228,6 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 	// Reacquire the lock for the return
 	m.mu.Lock()
 	return nil
-}
-
-// analyzePatientMessage processes a patient message to extract information
-func (m *ConversationManager) analyzePatientMessage(conversationID string, messageIndex int) {
-	m.mu.RLock()
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists || messageIndex >= len(conversation.Transcript) {
-		m.mu.RUnlock()
-		logger.Error("Cannot analyze message - conversation not found or message index invalid",
-			"conversation_id", conversationID,
-			"message_index", messageIndex)
-		return
-	}
-
-	message := conversation.Transcript[messageIndex]
-	if message.Speaker != "patient" || message.IsProcessed {
-		m.mu.RUnlock()
-		return
-	}
-
-	status := conversation.Status
-
-	var contextBuilder strings.Builder
-	for i := 0; i < messageIndex; i++ {
-		prev := conversation.Transcript[i]
-		contextBuilder.WriteString(fmt.Sprintf("%s: %s\n", prev.Speaker, prev.Text))
-	}
-
-	logger.Info("Analyzing patient message",
-		"conversation_id", conversationID,
-		"message_text", message.Text,
-		"status", status)
-	m.mu.RUnlock()
-
-	var analysisPrompt string
-
-	switch status {
-	case StatusGreeting:
-		analysisPrompt = `The patient is providing their name. Extract their name.
-Output JSON with the format: {"patient_name": "Name of Patient"}`
-
-	case StatusIdentity:
-		analysisPrompt = `The patient is providing their email address. Extract the email.
-Output JSON with the format: {"patient_email": "email@example.com"}`
-
-	case StatusSymptoms:
-		analysisPrompt = `Extract all symptoms mentioned. Include duration, severity or any details provided.
-Output JSON with the format: {
-  "symptoms": ["symptom1 with details", "symptom2 with details"],
-  "duration": "duration information",
-  "severity": "severity information if mentioned"
-}`
-
-	case StatusHistory:
-		analysisPrompt = `Extract all medical conditions and previous surgeries mentioned.
-Output JSON with the format: {
-  "medical_conditions": ["condition1", "condition2"],
-  "surgeries": ["surgery1", "surgery2"]
-}`
-
-	case StatusMedication:
-		analysisPrompt = `Extract all medications and allergies mentioned.
-Output JSON with the format: {
-  "medications": ["medication1 and dosage", "medication2 and dosage"],
-  "allergies": ["allergy1", "allergy2"]
-}`
-
-	case StatusQuestions:
-		analysisPrompt = `Extract any questions or additional information provided.
-Output JSON with the format: {
-  "additional_info": "any additional health information"
-}`
-
-	default:
-		analysisPrompt = `Extract any relevant medical information from the patient's message.
-Output JSON with the format: {"information": "extracted information"}`
-	}
-
-	fullPrompt := fmt.Sprintf(`
-Extract only the specific pieces of information from the patient's response.
-Be factual and precise. Only extract information that is clearly stated by the patient.
-
-Patient's message: "%s"
-
-%s
-`, message.Text, analysisPrompt)
-
-	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
-		MaxTokens:   512,
-		Temperature: 0.1,
-		ModelName:   "gpt-3.5-turbo",
-	})
-
-	if err != nil {
-		logger.Error("Error analyzing patient message", "error", err)
-		return
-	}
-
-	// Extract JSON from response - look for everything between { and }
-	jsonStart := strings.Index(response.Text, "{")
-	jsonEnd := strings.LastIndex(response.Text, "}")
-
-	if jsonStart >= 0 && jsonEnd > jsonStart {
-		jsonText := response.Text[jsonStart : jsonEnd+1]
-		logger.Info("Extracted JSON from analysis", "json", jsonText)
-
-		var extractedData map[string]interface{}
-		err = json.Unmarshal([]byte(jsonText), &extractedData)
-		if err != nil {
-			logger.Error("Error parsing JSON from analysis", "error", err, "json", jsonText)
-
-			// Fallback for name extraction
-			if status == StatusGreeting {
-				m.mu.Lock()
-				conversation, exists := m.activeConversations[conversationID]
-				if exists && messageIndex < len(conversation.Transcript) {
-					patientMessage := conversation.Transcript[messageIndex].Text
-					// Use a cleaner name extraction
-					words := strings.Fields(patientMessage)
-					if len(words) > 0 {
-						nameToUse := words[0]
-						if len(words) > 1 {
-							nameToUse = strings.Join(words[:2], " ")
-						}
-						if len(nameToUse) > 30 {
-							nameToUse = nameToUse[:30]
-						}
-						conversation.PatientName = nameToUse
-						conversation.CollectedData["patient_name"] = nameToUse
-						logger.Info("Used fallback name extraction",
-							"name", nameToUse,
-							"conversation_id", conversationID)
-					}
-				}
-				m.mu.Unlock()
-			}
-			return
-		}
-
-		m.mu.Lock()
-		defer m.mu.Unlock()
-
-		conversation, exists = m.activeConversations[conversationID]
-		if !exists {
-			return
-		}
-
-		if messageIndex >= len(conversation.Transcript) {
-			return
-		}
-
-		conversation.Transcript[messageIndex].IsProcessed = true
-
-		if status == StatusGreeting && extractedData["patient_name"] != nil {
-			patientName, ok := extractedData["patient_name"].(string)
-			if ok && patientName != "" {
-				conversation.PatientName = patientName
-				conversation.CollectedData["patient_name"] = patientName
-				logger.Info("Extracted patient name",
-					"name", patientName,
-					"conversation_id", conversationID)
-			} else {
-				// Fallback: use the message text as the name
-				patientMessage := conversation.Transcript[messageIndex].Text
-				if patientMessage != "" {
-					nameWords := strings.Fields(patientMessage)
-					nameToUse := patientMessage
-					if len(nameWords) > 0 && len(nameWords) <= 3 {
-						nameToUse = strings.Join(nameWords, " ")
-					}
-					conversation.PatientName = nameToUse
-					conversation.CollectedData["patient_name"] = nameToUse
-					logger.Info("Using message as patient name",
-						"name", nameToUse,
-						"conversation_id", conversationID)
-				}
-			}
-		} else if status == StatusIdentity && extractedData["patient_email"] != nil {
-			patientEmail, ok := extractedData["patient_email"].(string)
-			if ok && patientEmail != "" {
-				conversation.PatientEmail = patientEmail
-				conversation.CollectedData["patient_email"] = patientEmail
-				logger.Info("Extracted patient email",
-					"email", patientEmail,
-					"conversation_id", conversationID)
-			}
-		} else {
-			// For other data, store it directly in CollectedData
-			for key, value := range extractedData {
-				if value != nil {
-					conversation.CollectedData[key] = value
-					logger.Info("Stored extracted data",
-						"key", key,
-						"conversation_id", conversationID)
-				}
-			}
-		}
-
-		logger.Info("Analyzed patient message",
-			"conversation_id", conversationID,
-			"extracted_keys", getMapKeys(extractedData),
-			"patient_name", conversation.PatientName,
-			"conversation_status", conversation.Status)
-	} else {
-		logger.Error("No JSON found in analysis response",
-			"response", response.Text,
-			"conversation_id", conversationID)
-
-		// Fallback for name extraction
-		if status == StatusGreeting {
-			m.mu.Lock()
-			conversation, exists := m.activeConversations[conversationID]
-			if exists && messageIndex < len(conversation.Transcript) {
-				patientMessage := conversation.Transcript[messageIndex].Text
-				if patientMessage != "" {
-					nameWords := strings.Fields(patientMessage)
-					nameToUse := patientMessage
-					if len(nameWords) > 0 && len(nameWords) <= 3 {
-						nameToUse = strings.Join(nameWords, " ")
-					}
-					conversation.PatientName = nameToUse
-					conversation.CollectedData["patient_name"] = nameToUse
-					logger.Info("Used fallback name extraction after JSON parsing failure",
-						"name", nameToUse,
-						"conversation_id", conversationID)
-				}
-			}
-			m.mu.Unlock()
-		}
-	}
 }
 
 // GetNextResponse generates the next AI response with improved flow control
@@ -640,116 +383,230 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		return
 	}
 
-	logger.Info("Checking conversation progression",
-		"conversation_id", conversationID,
-		"current_status", conversation.Status,
-		"has_name", conversation.PatientName != "",
-		"has_email", conversation.PatientEmail != "")
+	// Count patient responses to determine progression
+	patientResponses := 0
+	hasAskedAboutName := false
+	hasAskedAboutAge := false
+	hasAskedAboutSymptoms := false
+	hasAskedAboutConditions := false
+	hasAskedAboutMedications := false
+	hasAskedAboutAnythingElse := false
 
-	// Count exchanges at each stage to prevent getting stuck
-	stageExchangeCount := make(map[ConversationStatus]int)
+	for _, exchange := range conversation.Transcript {
+		if exchange.Speaker == "patient" {
+			patientResponses++
+		}
 
-	for i := 0; i < len(conversation.Transcript); i++ {
-		if conversation.Transcript[i].Speaker == "ai" {
-			// Use the conversation status at the time this message was sent
-			// (This is an approximation since we don't store status with messages)
-			var messageStage ConversationStatus
-
-			// Try to determine the stage based on message content
-			message := strings.ToLower(conversation.Transcript[i].Text)
-			if strings.Contains(message, "email") {
-				messageStage = StatusIdentity
-			} else if strings.Contains(message, "health concern") || strings.Contains(message, "symptoms") {
-				messageStage = StatusSymptoms
-			} else if strings.Contains(message, "medical history") || strings.Contains(message, "health conditions") {
-				messageStage = StatusHistory
-			} else if strings.Contains(message, "medications") || strings.Contains(message, "allergies") {
-				messageStage = StatusMedication
-			} else if i == 0 || strings.Contains(message, "name") {
-				messageStage = StatusGreeting
-			} else {
-				messageStage = StatusQuestions
+		if exchange.Speaker == "ai" {
+			text := strings.ToLower(exchange.Text)
+			if strings.Contains(text, "name") {
+				hasAskedAboutName = true
+			} else if strings.Contains(text, "age") || strings.Contains(text, "gender") {
+				hasAskedAboutAge = true
+			} else if strings.Contains(text, "symptom") {
+				hasAskedAboutSymptoms = true
+			} else if strings.Contains(text, "condition") || strings.Contains(text, "history") {
+				hasAskedAboutConditions = true
+			} else if strings.Contains(text, "medication") || strings.Contains(text, "allergies") || strings.Contains(text, "taking") {
+				hasAskedAboutMedications = true
+			} else if strings.Contains(text, "anything else") || strings.Contains(text, "other") {
+				hasAskedAboutAnythingElse = true
 			}
-
-			stageExchangeCount[messageStage]++
 		}
 	}
 
-	// Logic for progressing the conversation
-	switch conversation.Status {
-	case StatusGreeting:
-		if conversation.PatientName != "" || stageExchangeCount[StatusGreeting] >= 2 {
-			// Set a placeholder name if needed
-			if conversation.PatientName == "" {
-				conversation.PatientName = "Patient"
-				conversation.CollectedData["patient_name"] = "Patient"
-			}
+	// Simple state machine based on what's been asked
+	if !hasAskedAboutName || conversation.Status == StatusGreeting {
+		if hasAskedAboutName && patientResponses >= 1 {
 			conversation.Status = StatusIdentity
-			logger.Info("Conversation progressed to identity stage",
-				"conversation_id", conversationID,
-				"patient_name", conversation.PatientName)
+		} else {
+			conversation.Status = StatusGreeting
+		}
+	} else if !hasAskedAboutAge || conversation.Status == StatusIdentity {
+		if hasAskedAboutAge && patientResponses >= 2 {
+			conversation.Status = StatusSymptoms
+		} else {
+			conversation.Status = StatusIdentity
+		}
+	} else if !hasAskedAboutSymptoms || conversation.Status == StatusSymptoms {
+		if hasAskedAboutSymptoms && patientResponses >= 3 {
+			conversation.Status = StatusHistory
+		} else {
+			conversation.Status = StatusSymptoms
+		}
+	} else if !hasAskedAboutConditions || conversation.Status == StatusHistory {
+		if hasAskedAboutConditions && patientResponses >= 4 {
+			conversation.Status = StatusMedication
+		} else {
+			conversation.Status = StatusHistory
+		}
+	} else if !hasAskedAboutMedications || conversation.Status == StatusMedication {
+		if hasAskedAboutMedications && patientResponses >= 5 {
+			conversation.Status = StatusQuestions
+		} else {
+			conversation.Status = StatusMedication
+		}
+	} else if !hasAskedAboutAnythingElse || conversation.Status == StatusQuestions {
+		if hasAskedAboutAnythingElse && patientResponses >= 6 {
+			conversation.Status = StatusClosing
+		} else {
+			conversation.Status = StatusQuestions
+		}
+	} else {
+		conversation.Status = StatusClosing
+	}
+
+	logger.Info("Conversation progressed",
+		"conversation_id", conversationID,
+		"new_status", conversation.Status,
+		"patient_responses", patientResponses)
+}
+
+// analyzePatientMessage analyzes a patient message to extract specific information
+func (m *ConversationManager) analyzePatientMessage(conversationID string, messageIndex int) {
+	m.mu.RLock()
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists || messageIndex >= len(conversation.Transcript) {
+		m.mu.RUnlock()
+		logger.Error("Cannot analyze message - conversation not found or message index invalid",
+			"conversation_id", conversationID,
+			"message_index", messageIndex)
+		return
+	}
+
+	message := conversation.Transcript[messageIndex]
+	if message.Speaker != "patient" || message.IsProcessed {
+		m.mu.RUnlock()
+		return
+	}
+
+	status := conversation.Status
+	m.mu.RUnlock()
+
+	var analysisPrompt string
+
+	switch status {
+	case StatusGreeting:
+		analysisPrompt = `Extract the patient's name from their response.
+Output as JSON: {"patient_name": "Full Name"}`
+
+	case StatusIdentity:
+		analysisPrompt = `Extract the patient's age and gender from their response.
+Output as JSON: {"age": 42, "gender": "male/female/other"}`
+
+	case StatusSymptoms:
+		analysisPrompt = `Extract all symptoms mentioned by the patient.
+Output as JSON: {"symptoms": ["symptom 1", "symptom 2", ...]}`
+
+	case StatusHistory:
+		analysisPrompt = `Extract all medical conditions mentioned by the patient.
+Output as JSON: {"conditions": ["condition 1", "condition 2", ...]}`
+
+	case StatusMedication:
+		analysisPrompt = `Extract all medications and allergies mentioned.
+Output as JSON: {"medications": ["med 1", "med 2", ...], "allergies": ["allergy 1", "allergy 2", ...]}`
+
+	case StatusQuestions:
+		analysisPrompt = `Extract any additional health information mentioned.
+Output as JSON: {"additional_info": "summary of additional information"}`
+
+	default:
+		analysisPrompt = `Extract any relevant health information.
+Output as JSON: {"information": "summary of information"}`
+	}
+
+	fullPrompt := fmt.Sprintf(`
+Extract ONLY the requested information from: "%s"
+%s
+MUST respond with valid JSON only.`, message.Text, analysisPrompt)
+
+	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
+		MaxTokens:   256,
+		Temperature: 0.1,
+		ModelName:   "gpt-3.5-turbo",
+	})
+
+	if err != nil {
+		logger.Error("Error analyzing patient message", "error", err)
+		return
+	}
+
+	// Extract JSON from response
+	jsonText := extractJSON(response.Text)
+
+	var extractedData map[string]interface{}
+	err = json.Unmarshal([]byte(jsonText), &extractedData)
+	if err != nil {
+		logger.Error("Error parsing JSON from analysis", "error", err, "json", jsonText)
+
+		// Basic fallback for name extraction
+		if status == StatusGreeting {
+			m.mu.Lock()
+			conversation, exists := m.activeConversations[conversationID]
+			if exists && messageIndex < len(conversation.Transcript) {
+				nameToUse := strings.TrimSpace(conversation.Transcript[messageIndex].Text)
+				if len(nameToUse) > 30 {
+					nameToUse = nameToUse[:30]
+				}
+				conversation.PatientName = nameToUse
+				conversation.CollectedData["patient_name"] = nameToUse
+				conversation.CollectedData["name"] = nameToUse
+				logger.Info("Used fallback name extraction", "name", nameToUse)
+			}
+			m.mu.Unlock()
+		}
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conversation, exists = m.activeConversations[conversationID]
+	if !exists || messageIndex >= len(conversation.Transcript) {
+		return
+	}
+
+	conversation.Transcript[messageIndex].IsProcessed = true
+
+	// Update collected data based on conversation state
+	switch status {
+	case StatusGreeting:
+		if name, ok := extractedData["patient_name"].(string); ok && name != "" {
+			conversation.PatientName = name
+			conversation.CollectedData["patient_name"] = name
+			conversation.CollectedData["name"] = name
+			logger.Info("Extracted patient name", "name", name)
 		}
 
 	case StatusIdentity:
-		if conversation.PatientEmail != "" || stageExchangeCount[StatusIdentity] >= 2 {
-			// Set a placeholder email if needed
-			if conversation.PatientEmail == "" {
-				conversation.PatientEmail = "unknown@example.com"
-				conversation.CollectedData["patient_email"] = "unknown@example.com"
-			}
-			conversation.Status = StatusSymptoms
-			logger.Info("Conversation progressed to symptoms stage",
-				"conversation_id", conversationID,
-				"identity_count", stageExchangeCount[StatusIdentity])
+		if age, ok := extractedData["age"].(float64); ok {
+			conversation.CollectedData["age"] = age
+		}
+		if gender, ok := extractedData["gender"].(string); ok {
+			conversation.CollectedData["gender"] = gender
 		}
 
 	case StatusSymptoms:
-		if stageExchangeCount[StatusSymptoms] >= 1 {
-			conversation.Status = StatusHistory
-			logger.Info("Conversation progressed to history stage",
-				"conversation_id", conversationID)
+		if symptoms, ok := extractedData["symptoms"].([]interface{}); ok {
+			conversation.CollectedData["symptoms"] = symptoms
 		}
 
 	case StatusHistory:
-		if stageExchangeCount[StatusHistory] >= 1 {
-			conversation.Status = StatusMedication
-			logger.Info("Conversation progressed to medication stage",
-				"conversation_id", conversationID)
+		if conditions, ok := extractedData["conditions"].([]interface{}); ok {
+			conversation.CollectedData["conditions"] = conditions
 		}
 
 	case StatusMedication:
-		if stageExchangeCount[StatusMedication] >= 1 {
-			conversation.Status = StatusQuestions
-			logger.Info("Conversation progressed to questions stage",
-				"conversation_id", conversationID)
+		if medications, ok := extractedData["medications"].([]interface{}); ok {
+			conversation.CollectedData["medications"] = medications
+		}
+		if allergies, ok := extractedData["allergies"].([]interface{}); ok {
+			conversation.CollectedData["allergies"] = allergies
 		}
 
 	case StatusQuestions:
-		if stageExchangeCount[StatusQuestions] >= 1 {
-			conversation.Status = StatusClosing
-			logger.Info("Conversation progressed to closing stage",
-				"conversation_id", conversationID)
-		}
-
-	case StatusClosing:
-		// Complete after one closing message and one patient reply
-		closingExchanges := 0
-		patientReplied := false
-
-		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if conversation.Transcript[i].Speaker == "ai" &&
-				strings.Contains(strings.ToLower(conversation.Transcript[i].Text), "thank") {
-				closingExchanges++
-			} else if conversation.Transcript[i].Speaker == "patient" && closingExchanges > 0 {
-				patientReplied = true
-				break
-			}
-		}
-
-		if (closingExchanges > 0 && patientReplied) || stageExchangeCount[StatusClosing] >= 2 {
-			conversation.Status = StatusComplete
-			logger.Info("Conversation ready for completion",
-				"conversation_id", conversationID)
+		if additionalInfo, ok := extractedData["additional_info"].(string); ok {
+			conversation.CollectedData["additional_info"] = additionalInfo
 		}
 	}
 }
@@ -832,89 +689,109 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		return nil, fmt.Errorf("conversation %s not found", conversationID)
 	}
 
-	processedData := map[string]any{
-		"patient_data": map[string]any{
-			"id":          conversationID,
-			"name":        conversation.PatientName,
-			"email":       conversation.PatientEmail,
-			"phone":       conversation.PatientPhone,
-			"symptoms":    []string{},
-			"conditions":  []string{},
-			"medications": []string{},
-			"allergies":   []string{},
-		},
-		"conversation_data": map[string]any{
-			"start_time": conversation.StartTime,
-			"end_time":   conversation.EndTime,
-			"duration":   conversation.Duration,
-			"status":     conversation.Status,
+	// Create a patient data structure that exactly matches our target format
+	patientData := map[string]any{
+		"id":          "P" + conversationID[len(conversationID)-5:],
+		"name":        conversation.PatientName,
+		"phone":       conversation.PatientPhone,
+		"symptoms":    []string{},
+		"conditions":  []string{},
+		"medications": []string{},
+		"allergies":   []string{},
+		"vitals": map[string]any{
+			"blood_pressure":    "",
+			"heart_rate":        0,
+			"temperature":       0.0,
+			"oxygen_saturation": 0,
 		},
 	}
 
-	patientData := processedData["patient_data"].(map[string]any)
+	// Set default age/gender if not available
+	if conversation.CollectedData["age"] == nil {
+		patientData["age"] = 0
+	} else {
+		patientData["age"] = conversation.CollectedData["age"]
+	}
 
+	if conversation.CollectedData["gender"] == nil {
+		patientData["gender"] = ""
+	} else {
+		patientData["gender"] = conversation.CollectedData["gender"]
+	}
+
+	// Process symptoms - convert from interface slice to string slice
 	if symptoms, ok := conversation.CollectedData["symptoms"].([]interface{}); ok {
-		symptomsList := make([]string, 0, len(symptoms))
+		symptomStrings := make([]string, 0, len(symptoms))
 		for _, s := range symptoms {
 			if symptom, ok := s.(string); ok {
-				symptomsList = append(symptomsList, symptom)
+				symptomStrings = append(symptomStrings, symptom)
 			}
 		}
-		patientData["symptoms"] = symptomsList
+		patientData["symptoms"] = symptomStrings
 	}
 
-	if conditions, ok := conversation.CollectedData["medical_conditions"].([]interface{}); ok {
-		conditionsList := make([]string, 0, len(conditions))
+	// Process conditions
+	if conditions, ok := conversation.CollectedData["conditions"].([]interface{}); ok {
+		conditionStrings := make([]string, 0, len(conditions))
 		for _, c := range conditions {
 			if condition, ok := c.(string); ok {
-				conditionsList = append(conditionsList, condition)
+				conditionStrings = append(conditionStrings, condition)
 			}
 		}
-		patientData["conditions"] = conditionsList
+		patientData["conditions"] = conditionStrings
 	}
 
+	// Process medications
 	if medications, ok := conversation.CollectedData["medications"].([]interface{}); ok {
-		medicationsList := make([]string, 0, len(medications))
+		medicationStrings := make([]string, 0, len(medications))
 		for _, m := range medications {
 			if medication, ok := m.(string); ok {
-				medicationsList = append(medicationsList, medication)
+				medicationStrings = append(medicationStrings, medication)
 			}
 		}
-		patientData["medications"] = medicationsList
+		patientData["medications"] = medicationStrings
 	}
 
+	// Process allergies
 	if allergies, ok := conversation.CollectedData["allergies"].([]interface{}); ok {
-		allergiesList := make([]string, 0, len(allergies))
+		allergyStrings := make([]string, 0, len(allergies))
 		for _, a := range allergies {
 			if allergy, ok := a.(string); ok {
-				allergiesList = append(allergiesList, allergy)
+				allergyStrings = append(allergyStrings, allergy)
 			}
 		}
-		patientData["allergies"] = allergiesList
+		patientData["allergies"] = allergyStrings
 	}
 
-	patientData["duration"] = conversation.CollectedData["duration"]
-	patientData["severity"] = conversation.CollectedData["severity"]
-	patientData["other_details"] = conversation.CollectedData["other_details"]
-
-	if conversation.CollectedData["age"] != nil {
-		patientData["age"] = 0
-		if ageStr, ok := conversation.CollectedData["age"].(string); ok {
-			var age float64
-			fmt.Sscanf(ageStr, "%f", &age)
-			patientData["age"] = age
-		} else if ageFloat, ok := conversation.CollectedData["age"].(float64); ok {
-			patientData["age"] = ageFloat
-		}
+	// Attempt to extract vitals from the conversation
+	// This could be expanded if we start to collect vitals specifically
+	if bp, ok := conversation.CollectedData["blood_pressure"].(string); ok {
+		vitals := patientData["vitals"].(map[string]any)
+		vitals["blood_pressure"] = bp
 	}
 
-	if conversation.CollectedData["gender"] != nil {
-		if gender, ok := conversation.CollectedData["gender"].(string); ok {
-			patientData["gender"] = gender
-		}
+	if hr, ok := conversation.CollectedData["heart_rate"].(float64); ok {
+		vitals := patientData["vitals"].(map[string]any)
+		vitals["heart_rate"] = hr
 	}
 
-	return processedData, nil
+	if temp, ok := conversation.CollectedData["temperature"].(float64); ok {
+		vitals := patientData["vitals"].(map[string]any)
+		vitals["temperature"] = temp
+	}
+
+	if o2, ok := conversation.CollectedData["oxygen_saturation"].(float64); ok {
+		vitals := patientData["vitals"].(map[string]any)
+		vitals["oxygen_saturation"] = o2
+	}
+
+	return map[string]any{
+		"patient_data": patientData,
+		"conversation_data": map[string]any{
+			"start_time": conversation.StartTime.Format(time.RFC3339),
+			"status":     string(conversation.Status),
+		},
+	}, nil
 }
 
 // GetConversationMessages retrieves all messages in a conversation
@@ -932,4 +809,16 @@ func (m *ConversationManager) GetConversationMessages(conversationID string) ([]
 	copy(messages, conversation.Transcript)
 
 	return messages, nil
+}
+
+func extractJSON(text string) string {
+	jsonStart := strings.Index(text, "{")
+	jsonEnd := strings.LastIndex(text, "}")
+
+	if jsonStart >= 0 && jsonEnd > jsonStart {
+		return text[jsonStart : jsonEnd+1]
+	}
+
+	// Fallback for missing brackets
+	return fmt.Sprintf(`{"error": "No valid JSON found in '%s'"}`, text)
 }

@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/conversation"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
-	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -193,75 +193,57 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		return nil, fmt.Errorf("invalid patient data format")
 	}
 
-	// Ensure the patient data has an ID
-	if patientData["id"] == nil || patientData["id"] == "" {
-		patientData["id"] = session.ConversationID
+	// Standardize the patient data
+	patientData = standardizePatientData(patientData)
+
+	// Generate a valid case ID for database storage - make sure it will work with PostgreSQL
+	originalCaseID := fmt.Sprintf("%s", patientData["id"])
+	if originalCaseID == "" {
+		originalCaseID = session.ConversationID
 	}
+
+	// Create a sanitized case ID for database usage - prefix with case_ and replace problem characters
+	caseID := "case_" + strings.ReplaceAll(session.ConversationID, "-", "_")
+	patientData["id"] = caseID
+	patientData["original_id"] = originalCaseID
+	patientData["case_id"] = caseID
+	patientData["conversation_id"] = session.ConversationID
 
 	// Log the patient data
 	logger.Info("Processed patient data",
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID,
+		"case_id", caseID,
 		"data_keys", getMapKeys(patientData))
 
-	patientData = standardizePatientData(patientData)
-
-	// Store the case in the repository first
-	caseID := fmt.Sprintf("%s", patientData["id"])
-	if caseID == "" {
-		caseID = session.ConversationID
-		patientData["id"] = caseID
-	}
-
-	var caseRepo repository.CaseRepository
+	// Store the case
 	var resultRepo repository.ResultRepository
 
-	for _, svc := range s.workflowService.GetAllServices() {
-		if repo, ok := svc.(repository.CaseRepository); ok {
-			caseRepo = repo
-		}
-		if repo, ok := svc.(repository.ResultRepository); ok {
-			resultRepo = repo
-		}
-	}
+	// Use the provided result repository if available
+	if s.resultRepository != nil {
+		resultRepo = s.resultRepository
 
-	// Now explicitly create the case before starting workflow
-	if caseRepo != nil {
-		err := caseRepo.StoreCase(caseID, patientData, false)
-		if err != nil {
-			logger.Error("Failed to store case data", "error", err, "case_id", caseID)
-			// Try with a memory repository as fallback
-			memoryRepo := memory.NewCaseRepository()
-			if err := memoryRepo.StoreCase(caseID, patientData, false); err != nil {
-				logger.Error("Failed to store case in memory fallback", "error", err)
+		// We'll attempt to store the case first
+		if caseRepo, ok := s.resultRepository.(repository.CaseRepository); ok {
+			err := caseRepo.StoreCase(caseID, patientData, false)
+			if err != nil {
+				logger.Error("Failed to store case with result repository", "error", err)
 			} else {
-				logger.Info("Successfully stored case in memory fallback", "case_id", caseID)
-				caseRepo = memoryRepo
+				logger.Info("Successfully stored case with result repository", "case_id", caseID)
 			}
-		} else {
-			logger.Info("Successfully stored case in database", "case_id", caseID)
-		}
-	} else {
-		logger.Error("No case repository found, creating memory repository", "case_id", caseID)
-		// Create a memory repository as fallback
-		memoryRepo := memory.NewCaseRepository()
-		if err := memoryRepo.StoreCase(caseID, patientData, false); err != nil {
-			logger.Error("Failed to store case in memory fallback", "error", err)
-		} else {
-			logger.Info("Successfully stored case in memory fallback", "case_id", caseID)
-			caseRepo = memoryRepo
 		}
 	}
 
-	// Select the appropriate workflow
-	workflowID, err := s.workflowService.SelectWorkflow(patientData)
-	if err != nil {
-		logger.Error("Failed to select workflow", "error", err)
-		workflowID = "standard_diagnostic_workflow" // Fallback to standard workflow
-	}
+	// Select standard diagnostic workflow by default
+	workflowID := "standard_diagnostic_workflow"
 
-	// Run the workflow using management API endpoint
-	logger.Info("Starting workflow with case", "workflow_id", workflowID, "case_id", caseID)
+	// Try to select a workflow if the service is available
+	if s.workflowService != nil {
+		selectedID, err := s.workflowService.SelectWorkflow(patientData)
+		if err == nil && selectedID != "" {
+			workflowID = selectedID
+		}
+	}
 
 	// Create input data for the workflow
 	inputData := map[string]any{
@@ -270,61 +252,41 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"conversation_id": session.ConversationID,
 	}
 
-	// Use proper endpoint format for workflow instances
-	workflowURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", s.baseURL, workflowID)
-
-	// Prepare the request body
-	jsonData, err := json.Marshal(inputData)
-	if err != nil {
-		logger.Error("Failed to marshal workflow input data", "error", err)
-	}
-
 	// Initialize UUID for the instance
 	instanceID := uuid.Nil
 
-	// Try direct API call
-	req, err := http.NewRequest("POST", workflowURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		logger.Error("Failed to create request", "error", err)
-	} else {
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
+	// Start the workflow via API
+	workflowURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", s.baseURL, workflowID)
+	jsonData, err := json.Marshal(inputData)
 
-		if err != nil {
-			logger.Error("API call failed", "error", err, "url", workflowURL)
-		} else {
-			defer resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				logger.Info("Successfully started workflow via API",
-					"workflow_id", workflowID, "case_id", caseID)
+	if err == nil {
+		req, err := http.NewRequest("POST", workflowURL, bytes.NewBuffer(jsonData))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 10 * time.Second}
+			resp, err := client.Do(req)
 
-				// Try to decode the response to get the instance ID
-				var apiResponse struct {
-					Message    string `json:"message"`
-					InstanceID string `json:"instance_id"`
-					WorkflowID string `json:"workflow_id"`
-					Status     string `json:"status"`
-				}
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					logger.Info("Successfully started workflow via API",
+						"workflow_id", workflowID, "case_id", caseID)
 
-				if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err == nil && apiResponse.InstanceID != "" {
-					// Store the instance ID as a string, we don't need to wait here
-					instanceUUID, uuidErr := uuid.Parse(apiResponse.InstanceID)
-					if uuidErr == nil {
-						instanceID = instanceUUID
+					// Try to get the instance ID
+					var apiResponse struct {
+						InstanceID string `json:"instance_id"`
+					}
+					if json.NewDecoder(resp.Body).Decode(&apiResponse) == nil && apiResponse.InstanceID != "" {
+						if id, err := uuid.Parse(apiResponse.InstanceID); err == nil {
+							instanceID = id
+						}
 					}
 				}
-			} else {
-				body, _ := io.ReadAll(resp.Body)
-				logger.Error("API response error",
-					"status", resp.StatusCode,
-					"response", string(body),
-					"url", workflowURL)
 			}
 		}
 	}
 
-	// Extract diagnosis and treatment data from result repository directly
+	// Extract diagnosis and treatment data from result repository
 	diagnosisData := make(map[string]any)
 	treatmentData := make(map[string]any)
 
@@ -332,8 +294,6 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 	if resultRepo != nil {
 		results, err := resultRepo.GetResultsByCaseID(caseID)
 		if err == nil && results != nil {
-			logger.Info("Found existing results for case", "case_id", caseID)
-
 			if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
 				diagnosisData = diagnosis
 			}
@@ -343,50 +303,25 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		}
 	}
 
-	// Send email if we have an email address
-	emailSent := false
-	emailAddress := ""
-
-	if email, ok := patientData["email"].(string); ok && email != "" && email != "unknown@example.com" {
-		emailAddress = email
-		patientName := "Patient"
-		if name, ok := patientData["name"].(string); ok && name != "" {
-			patientName = name
-		}
-
-		// Create and send the email
-		emailContent := s.emailSender.CreateMedicalSummaryEmail(
-			emailAddress,
-			patientName,
-			diagnosisData,
-			treatmentData,
-		)
-
-		if err := s.emailSender.Send(emailContent); err != nil {
-			logger.Error("Failed to send email", "error", err, "email", emailAddress)
-		} else {
-			logger.Info("Sent medical summary email", "email", emailAddress)
-			emailSent = true
-		}
-	}
-
-	// Record the results in the database
-	// instanceID was initialized earlier and possibly set from the API response
-
+	// Store basic results even if workflow fails
 	resultData := map[string]any{
 		"call_sid":        callSID,
 		"conversation_id": session.ConversationID,
 		"patient_data":    patientData,
-		"diagnosis":       diagnosisData,
-		"treatment_plan":  treatmentData,
 		"workflow_id":     workflowID,
 		"instance_id":     instanceID.String(),
-		"email_sent":      emailSent,
-		"email_address":   emailAddress,
-		"completed_at":    time.Now(),
+		"completed_at":    time.Now().Format(time.RFC3339),
 	}
 
-	// Store in result repository
+	// Add diagnosis and treatment if available
+	if len(diagnosisData) > 0 {
+		resultData["diagnosis"] = diagnosisData
+	}
+	if len(treatmentData) > 0 {
+		resultData["treatment_plan"] = treatmentData
+	}
+
+	// Store results
 	if resultRepo != nil {
 		if err := resultRepo.StoreResults(caseID, resultData); err != nil {
 			logger.Error("Failed to store call results", "error", err, "case_id", caseID)
@@ -404,8 +339,6 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		Treatment:      treatmentData,
 		WorkflowID:     workflowID,
 		InstanceID:     instanceID,
-		EmailSent:      emailSent,
-		EmailAddress:   emailAddress,
 		CompletedAt:    time.Now(),
 	}
 
@@ -421,33 +354,111 @@ func standardizePatientData(data map[string]any) map[string]any {
 		result[k] = v
 	}
 
-	// Ensure id exists
+	// Ensure id exists with P prefix
 	if result["id"] == nil || result["id"] == "" {
 		if id, ok := result["patient_id"].(string); ok && id != "" {
 			result["id"] = id
 		} else {
-			result["id"] = fmt.Sprintf("patient_%d", time.Now().UnixNano())
+			// Generate an ID with P prefix and timestamp
+			result["id"] = fmt.Sprintf("P%d", time.Now().Unix())
+		}
+	} else {
+		// Ensure ID starts with P
+		id := fmt.Sprintf("%v", result["id"])
+		if !strings.HasPrefix(id, "P") {
+			result["id"] = "P" + id
 		}
 	}
 
 	// Ensure basic fields exist
 	ensureField(result, "name", "")
-	ensureField(result, "age", float64(0))
+
+	// Ensure age is a number
+	if result["age"] == nil {
+		result["age"] = float64(0)
+	} else {
+		switch v := result["age"].(type) {
+		case string:
+			age, err := strconv.ParseFloat(v, 64)
+			if err == nil {
+				result["age"] = age
+			} else {
+				result["age"] = float64(0)
+			}
+		case int:
+			result["age"] = float64(v)
+		case float64:
+			// Already correct type
+		default:
+			result["age"] = float64(0)
+		}
+	}
+
 	ensureField(result, "gender", "")
 
-	// Ensure array fields exist
-	ensureArrayField(result, "symptoms")
-	ensureArrayField(result, "conditions")
-	ensureArrayField(result, "medications")
-	ensureArrayField(result, "allergies")
+	// Ensure array fields exist and are string arrays
+	ensureStringArrayField(result, "symptoms")
+	ensureStringArrayField(result, "conditions")
+	ensureStringArrayField(result, "medications")
+	ensureStringArrayField(result, "allergies")
 
-	// Ensure vitals map exists
+	// Ensure vitals map exists with all required fields
 	if result["vitals"] == nil {
 		result["vitals"] = map[string]any{
 			"blood_pressure":    "",
-			"heart_rate":        0,
-			"temperature":       0,
-			"oxygen_saturation": 0,
+			"heart_rate":        float64(0),
+			"temperature":       float64(0),
+			"oxygen_saturation": float64(0),
+		}
+	} else if vitalsMap, ok := result["vitals"].(map[string]any); ok {
+		// Ensure all vital fields exist
+		if _, exists := vitalsMap["blood_pressure"]; !exists {
+			vitalsMap["blood_pressure"] = ""
+		}
+		if _, exists := vitalsMap["heart_rate"]; !exists {
+			vitalsMap["heart_rate"] = float64(0)
+		} else {
+			switch v := vitalsMap["heart_rate"].(type) {
+			case string:
+				hr, err := strconv.ParseFloat(v, 64)
+				if err == nil {
+					vitalsMap["heart_rate"] = hr
+				} else {
+					vitalsMap["heart_rate"] = float64(0)
+				}
+			case int:
+				vitalsMap["heart_rate"] = float64(v)
+			}
+		}
+		if _, exists := vitalsMap["temperature"]; !exists {
+			vitalsMap["temperature"] = float64(0)
+		} else {
+			switch v := vitalsMap["temperature"].(type) {
+			case string:
+				temp, err := strconv.ParseFloat(v, 64)
+				if err == nil {
+					vitalsMap["temperature"] = temp
+				} else {
+					vitalsMap["temperature"] = float64(0)
+				}
+			case int:
+				vitalsMap["temperature"] = float64(v)
+			}
+		}
+		if _, exists := vitalsMap["oxygen_saturation"]; !exists {
+			vitalsMap["oxygen_saturation"] = float64(0)
+		} else {
+			switch v := vitalsMap["oxygen_saturation"].(type) {
+			case string:
+				o2, err := strconv.ParseFloat(v, 64)
+				if err == nil {
+					vitalsMap["oxygen_saturation"] = o2
+				} else {
+					vitalsMap["oxygen_saturation"] = float64(0)
+				}
+			case int:
+				vitalsMap["oxygen_saturation"] = float64(v)
+			}
 		}
 	}
 
@@ -461,25 +472,34 @@ func ensureField(data map[string]any, field string, defaultValue any) {
 	}
 }
 
-func ensureArrayField(data map[string]any, field string) {
+func ensureStringArrayField(data map[string]any, field string) {
 	if data[field] == nil {
 		data[field] = []string{}
-	} else if _, ok := data[field].([]string); !ok {
-		// Convert from []any to []string if needed
-		if arr, ok := data[field].([]any); ok {
-			strArr := make([]string, 0, len(arr))
-			for _, item := range arr {
-				if str, ok := item.(string); ok {
-					strArr = append(strArr, str)
-				} else {
-					strArr = append(strArr, fmt.Sprintf("%v", item))
-				}
+		return
+	}
+
+	// Convert from []any to []string if needed
+	switch value := data[field].(type) {
+	case []string:
+		// Already the right type
+		return
+	case []interface{}:
+		strArray := make([]string, 0, len(value))
+		for _, item := range value {
+			switch v := item.(type) {
+			case string:
+				strArray = append(strArray, v)
+			default:
+				strArray = append(strArray, fmt.Sprintf("%v", v))
 			}
-			data[field] = strArr
-		} else {
-			// If it's something else entirely, reset to empty array
-			data[field] = []string{}
 		}
+		data[field] = strArray
+	case string:
+		// Single string, convert to array
+		data[field] = []string{value}
+	default:
+		// Unrecognized type, reset to empty array
+		data[field] = []string{}
 	}
 }
 
