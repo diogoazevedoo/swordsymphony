@@ -104,7 +104,7 @@ func (c *CallController) HandleStatusCallback(ctx *gin.Context) {
 	webhookHandler.HandleStatusCallback(ctx)
 }
 
-// HandleSpeechCallback processes speech input from Twilio
+// HandleSpeechCallback processes speech input from Twilio with improved content awareness
 func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 	callSID := ctx.Query("call_sid")
 	if callSID == "" {
@@ -119,49 +119,52 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		"input", speechInput,
 		"input_length", len(speechInput))
 
-	// If no speech was detected, respond immediately with a prompt
+	// If no speech was detected, provide a simple response
 	if speechInput == "" {
 		logger.Warn("Empty speech input received", "call_sid", callSID)
-		c.respondWithSimpleTwiML(ctx, callSID, "I'm sorry, I didn't catch that. Could you please repeat?")
+		c.respondWithSimpleTwiML(ctx, callSID, "I didn't catch that. Let me ask you a different question.")
 		return
 	}
 
-	// Store the speech input for processing - do this only once
-	if err := c.callService.StoreMessage(callSID, "patient", speechInput); err != nil {
+	// Simply store the message - don't wait for processing
+	err := c.callService.StoreMessage(callSID, "patient", speechInput)
+	if err != nil {
 		logger.Error("Failed to store patient message", "error", err)
 	}
 
 	// Generate a response URL that will stream the real response when ready
 	responseURL := fmt.Sprintf("%s/api/call/response/%s", c.callService.GetBaseURL(), callSID)
 
-	// Create TwiML response that will play our audio and then gather the next speech input
+	// Create TwiML response that will play our audio and gather the next speech input
 	twiML := `<?xml version="1.0" encoding="UTF-8"?><Response>
-		<Play>` + responseURL + `</Play>
-		<Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
-	</Response>`
+        <Play>` + responseURL + `</Play>
+        <Gather input="speech" action="/api/call/speech?call_sid=` + callSID + `" language="en-US" speechTimeout="auto"/>
+    </Response>`
 
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiML)
 
-	// Process the speech input and prepare response asynchronously, only once
+	// Process the speech input and prepare response asynchronously
 	go func() {
-		// Set a timeout for this processing task
-		_, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// Process the input
+		// Generate the next response in the sequence
 		aiResponse, err := c.callService.HandleSpeechInput(callSID, speechInput)
-		if err != nil {
-			logger.Error("Error processing speech input", "error", err, "call_sid", callSID)
-			return
+		if err != nil || aiResponse == "" {
+			logger.Warn("Failed to generate AI response, using fallback",
+				"call_sid", callSID,
+				"error", err)
+			aiResponse = "Let me ask you the next question."
 		}
 
 		// Generate audio from the response
-		_, err = c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
-		if err != nil {
-			logger.Error("Error generating audio", "error", err, "call_sid", callSID)
-			return
+		_, audioErr := c.callService.GenerateAndStoreAudioResponse(callSID, aiResponse)
+		if audioErr != nil {
+			logger.Error("Error generating audio, will fall back to TTS",
+				"error", audioErr,
+				"call_sid", callSID)
 		}
+
+		// Force check for conversation completion to end call if necessary
+		c.callService.CheckConversationCompletion(callSID)
 	}()
 }
 
@@ -400,20 +403,36 @@ func (c *CallController) GetResponse(ctx *gin.Context) {
 		logger.Info("Serving stored audio response", "call_sid", callSID, "size", len(audioData))
 		ctx.Header("Content-Type", "audio/mpeg")
 		ctx.Header("Content-Length", fmt.Sprintf("%d", len(audioData)))
+		ctx.Header("Cache-Control", "no-cache") // Prevent caching to ensure fresh responses
 		ctx.Data(http.StatusOK, "audio/mpeg", audioData)
 		return
 	}
 
-	// If no audio is available, generate a simple response with TTS
-	// This serves as a fallback if audio generation failed
-	logger.Warn("No stored audio found, serving TTS fallback", "call_sid", callSID)
-
-	// Try to get the text response
+	// Attempt to get the text response while we wait for audio generation to complete
 	aiResponse, err := c.callService.GetLastAIResponse(callSID)
 	if err != nil || aiResponse == "" {
-		aiResponse = "I'm processing your request. Please continue with what you were saying."
+		aiResponse = "I'm processing your request. Let me continue with the next question."
 	}
 
+	// Wait briefly to see if audio becomes available (helps with race conditions)
+	time.Sleep(500 * time.Millisecond)
+
+	// Check again after waiting
+	c.audioMutex.RLock()
+	audioData, exists = c.audioFiles[callSID]
+	c.audioMutex.RUnlock()
+
+	if exists && len(audioData) > 0 {
+		logger.Info("Serving stored audio response after brief wait", "call_sid", callSID, "size", len(audioData))
+		ctx.Header("Content-Type", "audio/mpeg")
+		ctx.Header("Content-Length", fmt.Sprintf("%d", len(audioData)))
+		ctx.Header("Cache-Control", "no-cache")
+		ctx.Data(http.StatusOK, "audio/mpeg", audioData)
+		return
+	}
+
+	// If still no audio available, generate a simple response with TTS
+	logger.Warn("No stored audio found after waiting, serving TTS fallback", "call_sid", callSID)
 	ctx.Header("Content-Type", "text/plain")
 	ctx.String(http.StatusOK, aiResponse)
 }

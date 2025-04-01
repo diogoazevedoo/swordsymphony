@@ -744,7 +744,7 @@ func (s *Service) handleCallFailed(c *gin.Context, event twilio.CallEvent) error
 	return nil
 }
 
-// HandleSpeechInput processes speech input from a call
+// HandleSpeechInput - simplified to always progress
 func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, error) {
 	s.mu.RLock()
 	session, exists := s.activeStreamingSessions[callSID]
@@ -755,27 +755,24 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 		return "I'm sorry, I can't process your request right now.", nil
 	}
 
-	logger.Info("Processing speech input",
+	logger.Info("Handling speech input with deterministic progression",
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID,
 		"input", speechText)
-
-	// We're not adding the message here anymore as it's already added in HandleSpeechCallback
-	// This prevents duplicate message processing
 
 	s.mu.Lock()
 	session.LastActivity = time.Now()
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
-	// Get the response from the conversation manager
+	// Get the next response in the deterministic sequence
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
-		return "I'm sorry, but I'm having trouble right now. Could we try again?", nil
+		return "Let's continue with the next question.", nil
 	}
 
-	logger.Info("Successfully generated AI response",
+	logger.Info("Generated deterministic AI response",
 		"call_sid", callSID,
 		"response_length", len(aiResponse))
 
@@ -894,7 +891,19 @@ func (s *Service) StoreMessage(callSID string, speaker string, text string) erro
 		return fmt.Errorf("no active session for call %s", callSID)
 	}
 
-	return s.conversationManager.AddMessage(session.ConversationID, speaker, text, 0.9)
+	// Add message without waiting for any processing
+	err := s.conversationManager.AddMessage(session.ConversationID, speaker, text, 0.9)
+
+	if err != nil {
+		return err
+	}
+
+	logger.Info("Stored message with deterministic processing",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
+		"speaker", speaker)
+
+	return nil
 }
 
 // GetLastAIResponse gets the last AI response for a call
@@ -957,6 +966,30 @@ func copyStringArray(src map[string]any, field string, dest map[string]any) {
 	dest[field] = result
 }
 
+// StoreMessageAndWaitForProcessing - simplified to not wait
+func (s *Service) StoreMessageAndWaitForProcessing(callSID string, speaker string, text string) error {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	// First store the message as normal
+	err := s.StoreMessage(callSID, speaker, text)
+	if err != nil {
+		return err
+	}
+
+	// No need to wait since we're forcing progression
+	logger.Info("Message stored without waiting",
+		"call_sid", callSID,
+		"conversation_id", session.ConversationID)
+
+	return nil
+}
+
 // CheckConversationCompletion checks if the conversation is complete and ends the call if necessary
 func (s *Service) CheckConversationCompletion(callSID string) {
 	s.mu.RLock()
@@ -968,10 +1001,21 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 		return
 	}
 
-	// Get the conversation
-	conversation, ok := s.conversationManager.GetConversation(session.ConversationID)
-	if !ok {
-		logger.Error("Failed to get conversation", "error")
+	// Get the conversation - force retry on failure
+	var conversation *conversation.Conversation
+	var ok bool
+	for attempt := 0; attempt < 3; attempt++ {
+		conversation, ok = s.conversationManager.GetConversation(session.ConversationID)
+		if ok {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !ok || conversation == nil {
+		logger.Error("Failed to get conversation after retries",
+			"call_sid", callSID,
+			"conversation_id", session.ConversationID)
 		return
 	}
 
@@ -979,11 +1023,11 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 	if conversation.Status == "complete" || conversation.Status == "closing" {
 		logger.Info("Conversation completed, ending call automatically",
 			"call_sid", callSID,
-			"conversation_id", session.ConversationID)
+			"conversation_id", session.ConversationID,
+			"status", conversation.Status)
 
-		// Fixed delay - simple but effective
-		// 25 seconds should be enough for any goodbye message to complete
-		delaySeconds := 25
+		// Fixed delay - still simple but more reliable
+		delaySeconds := 15
 
 		logger.Info("Delaying call end to allow message playback",
 			"call_sid", callSID,
@@ -993,9 +1037,8 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 		time.Sleep(time.Duration(delaySeconds) * time.Second)
 
 		// Double check that we're still in complete state
-		// This prevents a race condition if another message came in while we were waiting
 		conversation, stillExists := s.conversationManager.GetConversation(session.ConversationID)
-		if !stillExists || conversation.Status != "complete" {
+		if !stillExists || (conversation.Status != "complete" && conversation.Status != "closing") {
 			logger.Info("Conversation state changed during delay, not ending call",
 				"call_sid", callSID)
 			return
@@ -1007,5 +1050,51 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 		} else {
 			logger.Info("Call ended automatically", "call_sid", callSID)
 		}
+	}
+}
+
+// GenerateCustomResponse produces tailored responses for special cases
+func (s *Service) GenerateCustomResponse(callSID string, text string, responseType string) (string, error) {
+	s.mu.RLock()
+	session, exists := s.activeStreamingSessions[callSID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	// Get the conversation directly (not using type assertion)
+	conversation, ok := s.conversationManager.GetConversation(session.ConversationID)
+	if !ok {
+		return "", fmt.Errorf("conversation %s not found", session.ConversationID)
+	}
+
+	switch responseType {
+	case "name_correction":
+		// Handle name correction responses
+		if conversation.PatientName != "" {
+			return fmt.Sprintf("Thank you for the correction. I've updated your name to %s. Let's continue from where we were.",
+				conversation.PatientName), nil
+		}
+		return "I've noted your name. Let's continue with the next question.", nil
+
+	case "repeat_question":
+		// Get the most recent AI message (previous question)
+		var lastQuestion string
+		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+			if conversation.Transcript[i].Speaker == "ai" {
+				lastQuestion = conversation.Transcript[i].Text
+				break
+			}
+		}
+
+		if lastQuestion != "" {
+			return "Let me repeat the question: " + lastQuestion, nil
+		}
+		return "Could you please answer the last question?", nil
+
+	default:
+		// No custom response for this type
+		return "", fmt.Errorf("no custom response available for type: %s", responseType)
 	}
 }

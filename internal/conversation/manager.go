@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -210,7 +211,6 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 }
 
 // analyzePatientMessageSync analyzes a patient message synchronously
-// analyzePatientMessageSync analyzes a patient message synchronously
 func (m *ConversationManager) analyzePatientMessageSync(conversationID string, messageIndex int) error {
 	m.mu.RLock()
 	conversation, exists := m.activeConversations[conversationID]
@@ -228,12 +228,66 @@ func (m *ConversationManager) analyzePatientMessageSync(conversationID string, m
 		return nil
 	}
 
-	status := conversation.Status
+	currentStatus := conversation.Status
+	inputText := message.Text
 	m.mu.RUnlock()
 
+	// First, check for special commands that might override the normal flow
+	textLower := strings.ToLower(inputText)
+
+	// If user is trying to correct their name
+	if (currentStatus != StatusName && currentStatus != StatusGreeting) &&
+		(strings.Contains(textLower, "my name") || strings.Contains(textLower, "name is")) {
+		// Special handling for name correction
+		logger.Info("Detected name correction attempt",
+			"conversation_id", conversationID,
+			"input", inputText)
+
+		// Extract the name and update directly
+		nameExtractPrompt := `Extract the patient's name from their response.
+If you can't find a name, just return an empty string or your best guess.
+Output as JSON: {"patient_name": "Full Name"}`
+
+		fullPrompt := fmt.Sprintf(`
+Extract information from: "%s"
+%s
+IMPORTANT: Your response MUST be valid JSON with no additional text.`, inputText, nameExtractPrompt)
+
+		response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
+			MaxTokens:   256,
+			Temperature: 0.1,
+			ModelName:   "gpt-3.5-turbo",
+		})
+
+		if err == nil {
+			jsonText := extractJSON(response.Text)
+			var extractedData map[string]interface{}
+			if json.Unmarshal([]byte(jsonText), &extractedData) == nil {
+				if name, ok := extractedData["patient_name"].(string); ok && name != "" {
+					m.mu.Lock()
+					conversation, stillExists := m.activeConversations[conversationID]
+					if stillExists {
+						conversation.PatientName = name
+						conversation.CollectedData["patient_name"] = name
+						conversation.CollectedData["name"] = name
+
+						// Mark message as processed but DO NOT advance state
+						conversation.Transcript[messageIndex].IsProcessed = true
+						logger.Info("Updated patient name through correction",
+							"conversation_id", conversationID,
+							"name", name)
+					}
+					m.mu.Unlock()
+					return nil
+				}
+			}
+		}
+	}
+
+	// Normal processing based on current status
 	var analysisPrompt string
 
-	switch status {
+	switch currentStatus {
 	case StatusName, StatusGreeting:
 		analysisPrompt = `Extract the patient's name from their response.
 If you can't find a name, just return an empty string or your best guess.
@@ -279,7 +333,7 @@ Output as JSON with ALL the following fields (use empty arrays if none found):
 Extract information from: "%s"
 %s
 IMPORTANT: Your response MUST be valid JSON with no additional text.
-If certain information is missing, include empty values rather than omitting fields.`, message.Text, analysisPrompt)
+If certain information is missing, include empty values rather than omitting fields.`, inputText, analysisPrompt)
 
 	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
 		MaxTokens:   256,
@@ -290,7 +344,21 @@ If certain information is missing, include empty values rather than omitting fie
 	if err != nil {
 		logger.Error("Error analyzing patient message", "error", err)
 		// Implement fallback extraction regardless of error
-		fallbackExtraction(m, conversationID, messageIndex, message.Text)
+		fallbackExtraction(m, conversationID, messageIndex, inputText)
+
+		// Even after error, we should mark the message as processed and advance the state
+		m.mu.Lock()
+		conversation, stillExists := m.activeConversations[conversationID]
+		if stillExists && messageIndex < len(conversation.Transcript) {
+			conversation.Transcript[messageIndex].IsProcessed = true
+			// Only advance the state after processing a patient message if we extracted needed info
+			advanceConversationState(conversation)
+			logger.Info("Forced state advancement after extraction error",
+				"conversation_id", conversationID,
+				"new_state", string(conversation.Status))
+		}
+		m.mu.Unlock()
+
 		return err
 	}
 
@@ -302,7 +370,20 @@ If certain information is missing, include empty values rather than omitting fie
 	if err != nil {
 		logger.Error("Error parsing JSON from analysis", "error", err, "json", jsonText)
 		// Implement fallback extraction
-		fallbackExtraction(m, conversationID, messageIndex, message.Text)
+		fallbackExtraction(m, conversationID, messageIndex, inputText)
+
+		// Even after JSON parsing error, mark message as processed and advance the state
+		m.mu.Lock()
+		conversation, stillExists := m.activeConversations[conversationID]
+		if stillExists && messageIndex < len(conversation.Transcript) {
+			conversation.Transcript[messageIndex].IsProcessed = true
+			advanceConversationState(conversation)
+			logger.Info("Forced state advancement after JSON parsing error",
+				"conversation_id", conversationID,
+				"new_state", string(conversation.Status))
+		}
+		m.mu.Unlock()
+
 		return err
 	}
 
@@ -316,102 +397,131 @@ If certain information is missing, include empty values rather than omitting fie
 
 	conversation.Transcript[messageIndex].IsProcessed = true
 
+	// Variable to track whether we successfully extracted the expected information
+	extractedExpectedInfo := false
+
 	// Update collected data based on conversation state
-	switch status {
+	switch currentStatus {
 	case StatusGreeting, StatusName:
 		if name, ok := extractedData["patient_name"].(string); ok && name != "" {
 			conversation.PatientName = name
 			conversation.CollectedData["patient_name"] = name
 			conversation.CollectedData["name"] = name
 			logger.Info("Extracted patient name", "name", name)
-			// Force transition to the next state
-			conversation.Status = StatusAge
-			conversation.QuestionsAsked["name"] = true
+			extractedExpectedInfo = true
 		}
 
 	case StatusAge:
 		if age, ok := extractedData["age"].(float64); ok && age > 0 {
 			conversation.CollectedData["age"] = age
 			logger.Info("Extracted patient age", "age", age)
-			// Force transition to the next state
-			conversation.Status = StatusGender
-			conversation.QuestionsAsked["age"] = true
+			extractedExpectedInfo = true
+		} else if ageStr, ok := extractedData["age"].(string); ok {
+			// Try to convert string to number
+			if age, err := strconv.ParseFloat(ageStr, 64); err == nil && age > 0 {
+				conversation.CollectedData["age"] = age
+				logger.Info("Extracted patient age from string", "age", age)
+				extractedExpectedInfo = true
+			}
 		}
 
 	case StatusGender:
 		if gender, ok := extractedData["gender"].(string); ok && gender != "" {
 			conversation.CollectedData["gender"] = gender
 			logger.Info("Extracted patient gender", "gender", gender)
-			// Force transition to the next state
-			conversation.Status = StatusSymptoms
-			conversation.QuestionsAsked["gender"] = true
+			extractedExpectedInfo = true
 		}
 
 	case StatusSymptoms:
 		if symptoms, ok := extractedData["symptoms"].([]interface{}); ok && len(symptoms) > 0 {
 			conversation.CollectedData["symptoms"] = symptoms
 			logger.Info("Extracted patient symptoms", "count", len(symptoms))
-			// Force transition to the next state
-			conversation.Status = StatusConditions
-			conversation.QuestionsAsked["symptoms"] = true
+			extractedExpectedInfo = true
 		}
 
 	case StatusConditions:
 		if conditions, ok := extractedData["conditions"].([]interface{}); ok && len(conditions) > 0 {
 			conversation.CollectedData["conditions"] = conditions
 			logger.Info("Extracted patient conditions", "count", len(conditions))
-			// Force transition to the next state
-			conversation.Status = StatusMedication
-			conversation.QuestionsAsked["conditions"] = true
-		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
-			strings.Contains(strings.ToLower(message.Text), "none") ||
-			strings.Contains(strings.ToLower(message.Text), "don't have") {
+			extractedExpectedInfo = true
+		} else if strings.Contains(strings.ToLower(inputText), "no") ||
+			strings.Contains(strings.ToLower(inputText), "none") ||
+			strings.Contains(strings.ToLower(inputText), "don't have") {
 			// Handle negative responses
 			conversation.CollectedData["conditions"] = []interface{}{}
-			conversation.Status = StatusMedication
-			conversation.QuestionsAsked["conditions"] = true
+			extractedExpectedInfo = true
 		}
 
 	case StatusMedication:
 		if medications, ok := extractedData["medications"].([]interface{}); ok && len(medications) > 0 {
 			conversation.CollectedData["medications"] = medications
 			logger.Info("Extracted patient medications", "count", len(medications))
-			// Force transition to the next state
-			conversation.Status = StatusAllergies
-			conversation.QuestionsAsked["medications"] = true
-		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
-			strings.Contains(strings.ToLower(message.Text), "none") ||
-			strings.Contains(strings.ToLower(message.Text), "don't take") {
+			extractedExpectedInfo = true
+		} else if strings.Contains(strings.ToLower(inputText), "no") ||
+			strings.Contains(strings.ToLower(inputText), "none") ||
+			strings.Contains(strings.ToLower(inputText), "don't take") {
 			// Handle negative responses
 			conversation.CollectedData["medications"] = []interface{}{}
-			conversation.Status = StatusAllergies
-			conversation.QuestionsAsked["medications"] = true
+			extractedExpectedInfo = true
 		}
 
 	case StatusAllergies:
 		if allergies, ok := extractedData["allergies"].([]interface{}); ok && len(allergies) > 0 {
 			conversation.CollectedData["allergies"] = allergies
 			logger.Info("Extracted patient allergies", "count", len(allergies))
-			// Force transition to the next state
-			conversation.Status = StatusClosing
-			conversation.QuestionsAsked["allergies"] = true
-		} else if strings.Contains(strings.ToLower(message.Text), "no") ||
-			strings.Contains(strings.ToLower(message.Text), "none") ||
-			strings.Contains(strings.ToLower(message.Text), "don't have") {
+			extractedExpectedInfo = true
+		} else if strings.Contains(strings.ToLower(inputText), "no") ||
+			strings.Contains(strings.ToLower(inputText), "none") ||
+			strings.Contains(strings.ToLower(inputText), "don't have") {
 			// Handle negative responses
 			conversation.CollectedData["allergies"] = []interface{}{}
-			conversation.Status = StatusClosing
-			conversation.QuestionsAsked["allergies"] = true
+			extractedExpectedInfo = true
 		}
 	}
 
 	// Always check for specific health data regardless of conversation state
 	scanForHealthData(extractedData, conversation.CollectedData)
 
+	// Only advance the state if we extracted the expected information
+	// or there's a clear indication that we should advance
+	if extractedExpectedInfo ||
+		strings.Contains(strings.ToLower(inputText), "next") ||
+		strings.Contains(strings.ToLower(inputText), "continue") ||
+		strings.Contains(strings.ToLower(inputText), "go ahead") {
+		advanceConversationState(conversation)
+		logger.Info("Advanced conversation state after successful extraction",
+			"conversation_id", conversationID,
+			"new_state", string(conversation.Status))
+	} else {
+		logger.Info("Did not advance conversation state - no relevant info extracted",
+			"conversation_id", conversationID,
+			"current_state", string(conversation.Status))
+	}
+
 	return nil
 }
 
-// GetNextResponse generates the next AI response with a strict flow
+func (m *ConversationManager) RepeatLastQuestion(conversationID string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		return "", fmt.Errorf("conversation %s not found", conversationID)
+	}
+
+	// Find the last AI message
+	for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+		if conversation.Transcript[i].Speaker == "ai" {
+			return conversation.Transcript[i].Text, nil
+		}
+	}
+
+	// Fallback if no previous AI message found
+	return "I didn't understand that. Could you please clarify?", nil
+}
+
+// GetNextResponse method with forced sequential progression
 func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -421,82 +531,66 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		return "", fmt.Errorf("conversation %s not found", conversationID)
 	}
 
-	// Check if we already have the next question ready
-	if len(conversation.Transcript) > 0 {
-		lastMsg := conversation.Transcript[len(conversation.Transcript)-1]
-		if lastMsg.Speaker == "ai" && !lastMsg.IsProcessed {
-			lastMsg.IsProcessed = true
-			conversation.Transcript[len(conversation.Transcript)-1] = lastMsg
-			return lastMsg.Text, nil
+	// Deterministic progression based on message count only
+	// Count how many questions we've asked and answer we've received
+	patientMessageCount := 0
+	aiMessageCount := 0
+	for _, msg := range conversation.Transcript {
+		if msg.Speaker == "patient" {
+			patientMessageCount++
+		} else if msg.Speaker == "ai" {
+			aiMessageCount++
 		}
 	}
 
-	// Track if we've just received a patient response
-	patientJustResponded := false
-	if len(conversation.Transcript) >= 2 {
-		lastMsg := conversation.Transcript[len(conversation.Transcript)-1]
-		prevMsg := conversation.Transcript[len(conversation.Transcript)-2]
-		if lastMsg.Speaker == "patient" && prevMsg.Speaker == "ai" {
-			patientJustResponded = true
-		}
-	}
-
-	// After receiving any patient response, always move to the next state
-	if patientJustResponded {
-		advanceConversationState(conversation)
-	}
-
-	logger.Info("Current conversation state",
-		"conversation_id", conversationID,
-		"status", string(conversation.Status),
-		"collected_keys", getMapKeys(conversation.CollectedData),
-		"patient_responded", patientJustResponded)
-
-	// Generate response for the current state
+	// Process based solely on how many questions we've asked
 	var nextQuestion string
+	var nextState ConversationStatus
 
-	switch conversation.Status {
-	case StatusGreeting:
+	// If this is the first response (no patient messages yet)
+	if patientMessageCount == 0 {
 		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
-		conversation.Status = StatusName
-
-	case StatusName:
+		nextState = StatusName
+	} else if patientMessageCount == 1 {
+		// After first patient response, ask for age
 		if conversation.PatientName != "" {
 			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", conversation.PatientName)
 		} else {
-			nextQuestion = "What is your name?"
+			nextQuestion = "Thank you. What is your age?"
 		}
-
-	case StatusAge:
+		nextState = StatusAge
+	} else if patientMessageCount == 2 {
+		// After second patient response, ask for gender
 		nextQuestion = "What is your gender?"
-
-	case StatusGender:
+		nextState = StatusGender
+	} else if patientMessageCount == 3 {
+		// After third patient response, ask for symptoms
 		nextQuestion = "What symptoms are you experiencing?"
-
-	case StatusSymptoms:
+		nextState = StatusSymptoms
+	} else if patientMessageCount == 4 {
+		// After fourth patient response, ask for conditions
 		nextQuestion = "Do you have any existing medical conditions?"
-
-	case StatusConditions:
+		nextState = StatusConditions
+	} else if patientMessageCount == 5 {
+		// After fifth patient response, ask for medications
 		nextQuestion = "What medications are you currently taking?"
-
-	case StatusMedication:
+		nextState = StatusMedication
+	} else if patientMessageCount == 6 {
+		// After sixth patient response, ask for allergies
 		nextQuestion = "Do you have any allergies?"
-
-	case StatusAllergies:
+		nextState = StatusAllergies
+	} else if patientMessageCount == 7 {
+		// After seventh patient response, thank the patient and begin closing
 		nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
-		conversation.Status = StatusClosing
-
-	case StatusClosing:
+		nextState = StatusClosing
+	} else {
+		// Any further responses, just say goodbye
 		nextQuestion = "Thank you for your time. Your information has been recorded. Goodbye."
-		conversation.Status = StatusComplete
-
-	case StatusComplete:
-		nextQuestion = "Goodbye."
-
-	default:
-		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
-		conversation.Status = StatusName
+		nextState = StatusComplete
 	}
+
+	// Store this response in the conversation transcript
+	conversation.Status = nextState
 
 	// Add the message to the conversation
 	exchange := MessageExchange{
@@ -509,15 +603,11 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 
 	conversation.Transcript = append(conversation.Transcript, exchange)
 
-	logger.Info("Added message to conversation",
+	logger.Info("Added message to conversation with strict progression",
 		"conversation_id", conversationID,
-		"speaker", "ai",
-		"text_length", len(nextQuestion),
-		"confidence", 1.0)
-
-	logger.Info("New conversation state",
-		"conversation_id", conversationID,
-		"status", string(conversation.Status))
+		"message_count", patientMessageCount,
+		"next_state", string(nextState),
+		"response_length", len(nextQuestion))
 
 	return nextQuestion, nil
 }
@@ -708,6 +798,76 @@ func scanForHealthData(extractedData map[string]interface{}, collectedData map[s
 			}
 			collectedData["allergies"] = existingAllergies
 		}
+	}
+}
+
+// SynchronizedAddPatientMessage adds a patient message and waits for processing to complete
+func (m *ConversationManager) SynchronizedAddPatientMessage(conversationID string, text string, confidence float64) error {
+	processingDone := make(chan error, 1)
+
+	// First, add the message - this will trigger analysis
+	err := m.AddMessage(conversationID, "patient", text, confidence)
+	if err != nil {
+		return err
+	}
+
+	// Wait for processing to complete (with timeout)
+	go func() {
+		// Small wait to ensure analysis starts
+		time.Sleep(100 * time.Millisecond)
+
+		// Poll to check if message is processed
+		for i := 0; i < 10; i++ {
+			m.mu.RLock()
+			conversation, exists := m.activeConversations[conversationID]
+			if !exists {
+				m.mu.RUnlock()
+				processingDone <- fmt.Errorf("conversation %s not found", conversationID)
+				return
+			}
+
+			// Find the last patient message
+			var lastPatientMsg *MessageExchange
+			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+				if conversation.Transcript[i].Speaker == "patient" {
+					lastPatientMsg = &conversation.Transcript[i]
+					break
+				}
+			}
+
+			if lastPatientMsg != nil && lastPatientMsg.IsProcessed {
+				// Message is processed, state has been updated
+				m.mu.RUnlock()
+				processingDone <- nil
+				return
+			}
+			m.mu.RUnlock()
+
+			// Wait before checking again
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// If we get here, processing is taking too long - force advance state
+		m.mu.Lock()
+		conversation, exists := m.activeConversations[conversationID]
+		if exists {
+			advanceConversationState(conversation)
+			logger.Info("Forced state advancement after timeout",
+				"conversation_id", conversationID,
+				"new_state", string(conversation.Status))
+		}
+		m.mu.Unlock()
+
+		processingDone <- nil
+	}()
+
+	// Wait with timeout
+	select {
+	case err := <-processingDone:
+		return err
+	case <-time.After(3 * time.Second):
+		// If it takes too long, continue anyway
+		return nil
 	}
 }
 
