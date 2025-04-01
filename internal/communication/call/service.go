@@ -2,8 +2,9 @@ package call
 
 import (
 	"bytes"
-	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/conversation"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
+	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -202,6 +204,8 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"conversation_id", session.ConversationID,
 		"data_keys", getMapKeys(patientData))
 
+	patientData = standardizePatientData(patientData)
+
 	// Store the case in the repository first
 	caseID := fmt.Sprintf("%s", patientData["id"])
 	if caseID == "" {
@@ -209,19 +213,43 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		patientData["id"] = caseID
 	}
 
-	// Explicitly create the case before starting workflow
+	var caseRepo repository.CaseRepository
 	var resultRepo repository.ResultRepository
+
 	for _, svc := range s.workflowService.GetAllServices() {
 		if repo, ok := svc.(repository.CaseRepository); ok {
-			err := repo.StoreCase(caseID, patientData, false)
-			if err != nil {
-				logger.Warn("Failed to store case data", "error", err, "case_id", caseID)
-			} else {
-				logger.Info("Successfully stored case data", "case_id", caseID)
-			}
+			caseRepo = repo
 		}
 		if repo, ok := svc.(repository.ResultRepository); ok {
 			resultRepo = repo
+		}
+	}
+
+	// Now explicitly create the case before starting workflow
+	if caseRepo != nil {
+		err := caseRepo.StoreCase(caseID, patientData, false)
+		if err != nil {
+			logger.Error("Failed to store case data", "error", err, "case_id", caseID)
+			// Try with a memory repository as fallback
+			memoryRepo := memory.NewCaseRepository()
+			if err := memoryRepo.StoreCase(caseID, patientData, false); err != nil {
+				logger.Error("Failed to store case in memory fallback", "error", err)
+			} else {
+				logger.Info("Successfully stored case in memory fallback", "case_id", caseID)
+				caseRepo = memoryRepo
+			}
+		} else {
+			logger.Info("Successfully stored case in database", "case_id", caseID)
+		}
+	} else {
+		logger.Error("No case repository found, creating memory repository", "case_id", caseID)
+		// Create a memory repository as fallback
+		memoryRepo := memory.NewCaseRepository()
+		if err := memoryRepo.StoreCase(caseID, patientData, false); err != nil {
+			logger.Error("Failed to store case in memory fallback", "error", err)
+		} else {
+			logger.Info("Successfully stored case in memory fallback", "case_id", caseID)
+			caseRepo = memoryRepo
 		}
 	}
 
@@ -232,24 +260,67 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		workflowID = "standard_diagnostic_workflow" // Fallback to standard workflow
 	}
 
-	// Run the workflow
+	// Run the workflow using management API endpoint
 	logger.Info("Starting workflow with case", "workflow_id", workflowID, "case_id", caseID)
 
-	// Direct API call to start workflow with case ID
-	workflowURL := fmt.Sprintf("/workflows/%s/start/%s", workflowID, caseID)
-	instance, err := s.workflowService.RunWorkflow(context.Background(), workflowID, patientData)
-	if err != nil {
-		logger.Error("Failed to run workflow", "error", err, "workflow_id", workflowID)
+	// Create input data for the workflow
+	inputData := map[string]any{
+		"patient_data":    patientData,
+		"case_id":         caseID,
+		"conversation_id": session.ConversationID,
+	}
 
-		// Fallback to direct API call if internal call fails
-		resp, apiErr := http.Post(fmt.Sprintf("%s/api%s", s.baseURL, workflowURL),
-			"application/json", nil)
-		if apiErr != nil {
-			logger.Error("Fallback API call also failed", "error", apiErr)
+	// Use proper endpoint format for workflow instances
+	workflowURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", s.baseURL, workflowID)
+
+	// Prepare the request body
+	jsonData, err := json.Marshal(inputData)
+	if err != nil {
+		logger.Error("Failed to marshal workflow input data", "error", err)
+	}
+
+	// Initialize UUID for the instance
+	instanceID := uuid.Nil
+
+	// Try direct API call
+	req, err := http.NewRequest("POST", workflowURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		logger.Error("Failed to create request", "error", err)
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+
+		if err != nil {
+			logger.Error("API call failed", "error", err, "url", workflowURL)
 		} else {
-			resp.Body.Close()
-			logger.Info("Successfully started workflow via API fallback",
-				"workflow_id", workflowID, "case_id", caseID)
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				logger.Info("Successfully started workflow via API",
+					"workflow_id", workflowID, "case_id", caseID)
+
+				// Try to decode the response to get the instance ID
+				var apiResponse struct {
+					Message    string `json:"message"`
+					InstanceID string `json:"instance_id"`
+					WorkflowID string `json:"workflow_id"`
+					Status     string `json:"status"`
+				}
+
+				if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err == nil && apiResponse.InstanceID != "" {
+					// Store the instance ID as a string, we don't need to wait here
+					instanceUUID, uuidErr := uuid.Parse(apiResponse.InstanceID)
+					if uuidErr == nil {
+						instanceID = instanceUUID
+					}
+				}
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				logger.Error("API response error",
+					"status", resp.StatusCode,
+					"response", string(body),
+					"url", workflowURL)
+			}
 		}
 	}
 
@@ -300,6 +371,8 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 	}
 
 	// Record the results in the database
+	// instanceID was initialized earlier and possibly set from the API response
+
 	resultData := map[string]any{
 		"call_sid":        callSID,
 		"conversation_id": session.ConversationID,
@@ -307,15 +380,10 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"diagnosis":       diagnosisData,
 		"treatment_plan":  treatmentData,
 		"workflow_id":     workflowID,
-		"instance_id": func() string {
-			if instance != nil {
-				return instance.ID.String()
-			}
-			return ""
-		}(),
-		"email_sent":    emailSent,
-		"email_address": emailAddress,
-		"completed_at":  time.Now(),
+		"instance_id":     instanceID.String(),
+		"email_sent":      emailSent,
+		"email_address":   emailAddress,
+		"completed_at":    time.Now(),
 	}
 
 	// Store in result repository
@@ -335,18 +403,84 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		Diagnosis:      diagnosisData,
 		Treatment:      treatmentData,
 		WorkflowID:     workflowID,
-		InstanceID: func() uuid.UUID {
-			if instance != nil {
-				return instance.ID
-			}
-			return uuid.Nil
-		}(),
-		EmailSent:    emailSent,
-		EmailAddress: emailAddress,
-		CompletedAt:  time.Now(),
+		InstanceID:     instanceID,
+		EmailSent:      emailSent,
+		EmailAddress:   emailAddress,
+		CompletedAt:    time.Now(),
 	}
 
 	return callResult, nil
+}
+
+func standardizePatientData(data map[string]any) map[string]any {
+	// Ensure we have all the required fields with correct types
+	result := make(map[string]any)
+
+	// Copy all existing data
+	for k, v := range data {
+		result[k] = v
+	}
+
+	// Ensure id exists
+	if result["id"] == nil || result["id"] == "" {
+		if id, ok := result["patient_id"].(string); ok && id != "" {
+			result["id"] = id
+		} else {
+			result["id"] = fmt.Sprintf("patient_%d", time.Now().UnixNano())
+		}
+	}
+
+	// Ensure basic fields exist
+	ensureField(result, "name", "")
+	ensureField(result, "age", float64(0))
+	ensureField(result, "gender", "")
+
+	// Ensure array fields exist
+	ensureArrayField(result, "symptoms")
+	ensureArrayField(result, "conditions")
+	ensureArrayField(result, "medications")
+	ensureArrayField(result, "allergies")
+
+	// Ensure vitals map exists
+	if result["vitals"] == nil {
+		result["vitals"] = map[string]any{
+			"blood_pressure":    "",
+			"heart_rate":        0,
+			"temperature":       0,
+			"oxygen_saturation": 0,
+		}
+	}
+
+	return result
+}
+
+// Helper functions for standardization
+func ensureField(data map[string]any, field string, defaultValue any) {
+	if data[field] == nil {
+		data[field] = defaultValue
+	}
+}
+
+func ensureArrayField(data map[string]any, field string) {
+	if data[field] == nil {
+		data[field] = []string{}
+	} else if _, ok := data[field].([]string); !ok {
+		// Convert from []any to []string if needed
+		if arr, ok := data[field].([]any); ok {
+			strArr := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					strArr = append(strArr, str)
+				} else {
+					strArr = append(strArr, fmt.Sprintf("%v", item))
+				}
+			}
+			data[field] = strArr
+		} else {
+			// If it's something else entirely, reset to empty array
+			data[field] = []string{}
+		}
+	}
 }
 
 // registerWebhookHandlers sets up handlers for Twilio webhooks

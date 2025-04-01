@@ -68,22 +68,57 @@ type ConversationManager struct {
 // ManagerOption configures a conversation manager
 type ManagerOption func(*ConversationManager)
 
-// NewConversationManager creates a new conversation manager
+// NewConversationManager creates a new conversation manager with improved prompts
 func NewConversationManager(aiClient ai.Client, options ...ManagerOption) *ConversationManager {
 	manager := &ConversationManager{
 		aiClient:            aiClient,
 		activeConversations: make(map[string]*Conversation),
 		systemPrompt: `You are an AI medical doctor conducting a phone interview with a patient. 
-Be efficient and direct while remaining friendly. Your goal is to quickly gather essential medical information in a conversational way.
-Keep responses under 3 sentences when possible. Ask only one question at a time. Avoid repeating questions.
-Collect: name, email, chief complaint, symptom details, medical history, current medications, and allergies.`,
-		greetingPrompt:   `Briefly introduce yourself as Dr. AI from SwordSymphony Medical. Say you'll ask a few questions about their health. This call is recorded to provide better care. Simply ask for their name. Keep it brief but friendly.`,
-		identityPrompt:   `Thank {{.PatientName}} and ask for their email address only so you can send a summary of your conversation. Confirm what you heard.`,
-		symptomsPrompt:   `Ask what health concern brings them to this call today. Don't list possible symptoms, just ask one clear question about their primary concern.`,
-		historyPrompt:    `Ask if they have any ongoing health conditions or significant past illnesses that might be relevant to their current symptoms. Keep it to one direct question.`,
-		medicationPrompt: `Ask about current medications and allergies in one simple question. Ask for medication names and any known allergies.`,
-		questionsPrompt:  `Ask if they have any questions or if there's anything else about their health they'd like to share.`,
-		closingPrompt:    `Thank them for sharing their information. Let them know you'll send this to the medical team who will analyze it and email them a detailed summary. Ask if there's anything else they need before ending the call.`,
+Be efficient, direct, and professional while remaining warm and empathetic. 
+Your goal is to quickly gather essential medical information in a conversational way.
+Keep responses under 3 sentences when possible. 
+Ask only ONE question at a time. 
+Never repeat questions that have already been asked or answered.
+Listen carefully to patient responses and adjust follow-up questions accordingly.
+Always keep track of what information you've already gathered.`,
+
+		// Clear, direct greeting that sets expectations
+		greetingPrompt: `Briefly introduce yourself as Dr. AI from SwordSymphony Medical. 
+Say you're going to ask a few quick questions about the patient's health. 
+Mention the call is being recorded to provide better care.
+Ask ONLY for their name - nothing else in this first exchange.
+Keep it brief but warm.`,
+
+		// Get email for follow-up
+		identityPrompt: `Thank {{.PatientName}} for sharing their name.
+Ask ONLY for their email address so you can send a summary of the conversation.
+Keep it brief and only ask this single question.`,
+
+		// Focus on primary concern
+		symptomsPrompt: `Ask what specific health concern brings them to this call today.
+Focus only on their primary symptoms in this question.
+Don't list possible symptoms or suggest answers - just ask one clear, open-ended question.`,
+
+		// Get medical history
+		historyPrompt: `Ask if they have any ongoing medical conditions or significant past medical history.
+Keep it to a single, direct question focused only on their medical history.
+Do not ask about medications or allergies yet - that will be your next question.`,
+
+		// Get medications and allergies
+		medicationPrompt: `Ask about what medications they're currently taking and if they have any known drug allergies.
+Ask this as a single question about both medications and allergies.
+Be brief and direct.`,
+
+		// Allow for additional information
+		questionsPrompt: `Ask if there's anything else about their health concerns they'd like to share,
+or if they have any questions before ending the call.
+Keep it brief and open-ended.`,
+
+		// Clear closing
+		closingPrompt: `Thank them for sharing their information.
+Let them know you'll send a summary to their email with an initial assessment.
+Briefly explain that a medical team will review their case and follow up if needed.
+End with a polite goodbye.`,
 	}
 
 	for _, option := range options {
@@ -220,89 +255,6 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 	// Reacquire the lock for the return
 	m.mu.Lock()
 	return nil
-}
-
-// GetNextResponse generates the next AI response
-func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
-	m.mu.RLock()
-	conversation, exists := m.activeConversations[conversationID]
-	if !exists {
-		m.mu.RUnlock()
-		return "", fmt.Errorf("conversation %s not found", conversationID)
-	}
-	m.mu.RUnlock()
-
-	var prompt string
-	switch conversation.Status {
-	case StatusGreeting:
-		prompt = m.greetingPrompt
-	case StatusIdentity:
-		prompt = strings.Replace(m.identityPrompt, "{{.PatientName}}", conversation.PatientName, -1)
-	case StatusSymptoms:
-		prompt = m.symptomsPrompt
-	case StatusHistory:
-		prompt = m.historyPrompt
-	case StatusMedication:
-		prompt = m.medicationPrompt
-	case StatusQuestions:
-		prompt = m.questionsPrompt
-	case StatusClosing:
-		prompt = m.closingPrompt
-	default:
-		prompt = "Continue the conversation naturally based on the context. Ask appropriate follow-up questions."
-	}
-
-	var conversationContext strings.Builder
-	conversationContext.WriteString("Here is the conversation so far:\n\n")
-
-	for _, exchange := range conversation.Transcript {
-		speakerName := exchange.Speaker
-		if speakerName == "patient" {
-			speakerName = "Patient"
-		} else {
-			speakerName = "Doctor"
-		}
-		conversationContext.WriteString(fmt.Sprintf("%s: %s\n", speakerName, exchange.Text))
-	}
-
-	fullPrompt := fmt.Sprintf(`
-%s
-
-Current conversation stage: %s
-
-%s
-
-Conversation context:
-%s
-
-Based on the conversation so far and the current stage, provide your next response as the AI doctor:
-`, m.systemPrompt, conversation.Status, prompt, conversationContext.String())
-
-	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
-		MaxTokens:    150,
-		Temperature:  0.7,
-		SystemPrompt: m.systemPrompt,
-	})
-
-	if err != nil {
-		logger.Error("Error generating AI response", "error", err)
-		return "", fmt.Errorf("error generating response: %w", err)
-	}
-
-	aiResponse := response.Text
-
-	aiResponse = strings.ReplaceAll(aiResponse, "Doctor:", "")
-	aiResponse = strings.ReplaceAll(aiResponse, "AI Doctor:", "")
-	aiResponse = strings.TrimSpace(aiResponse)
-
-	err = m.AddMessage(conversationID, "ai", aiResponse, 1.0)
-	if err != nil {
-		logger.Error("Error adding AI response to conversation", "error", err)
-	}
-
-	m.progressConversation(conversationID)
-
-	return aiResponse, nil
 }
 
 // analyzePatientMessage processes a patient message to extract information
@@ -535,7 +487,150 @@ Patient's message: "%s"
 	}
 }
 
-// progressConversation moves the conversation to the next stage if appropriate
+// GetNextResponse generates the next AI response with improved flow control
+func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
+	m.mu.RLock()
+	conversation, exists := m.activeConversations[conversationID]
+	if !exists {
+		m.mu.RUnlock()
+		return "", fmt.Errorf("conversation %s not found", conversationID)
+	}
+	m.mu.RUnlock()
+
+	// Check if we already have enough exchanges to determine what question to ask next
+	questionAsked := make(map[string]bool)
+
+	for _, exchange := range conversation.Transcript {
+		if exchange.Speaker == "ai" {
+			text := strings.ToLower(exchange.Text)
+			if strings.Contains(text, "email") {
+				questionAsked["email"] = true
+			}
+			if strings.Contains(text, "health concern") || strings.Contains(text, "symptoms") {
+				questionAsked["symptoms"] = true
+			}
+			if strings.Contains(text, "medical history") || strings.Contains(text, "health conditions") {
+				questionAsked["history"] = true
+			}
+			if strings.Contains(text, "medications") || strings.Contains(text, "allergies") {
+				questionAsked["medications"] = true
+			}
+		}
+	}
+
+	var prompt string
+	switch conversation.Status {
+	case StatusGreeting:
+		prompt = m.greetingPrompt
+	case StatusIdentity:
+		// Check if we need to get email
+		if !questionAsked["email"] {
+			prompt = strings.Replace(m.identityPrompt, "{{.PatientName}}", conversation.PatientName, -1)
+		} else {
+			// Force progress to symptoms if we've asked about email
+			m.mu.Lock()
+			conversation.Status = StatusSymptoms
+			m.mu.Unlock()
+			prompt = m.symptomsPrompt
+		}
+	case StatusSymptoms:
+		// Check if we need to ask about symptoms
+		if !questionAsked["symptoms"] {
+			prompt = m.symptomsPrompt
+		} else {
+			// Force progress to history if we've asked about symptoms
+			m.mu.Lock()
+			conversation.Status = StatusHistory
+			m.mu.Unlock()
+			prompt = m.historyPrompt
+		}
+	case StatusHistory:
+		// Check if we need to ask about medical history
+		if !questionAsked["history"] {
+			prompt = m.historyPrompt
+		} else {
+			// Force progress to medications if we've asked about history
+			m.mu.Lock()
+			conversation.Status = StatusMedication
+			m.mu.Unlock()
+			prompt = m.medicationPrompt
+		}
+	case StatusMedication:
+		// Check if we need to ask about medications
+		if !questionAsked["medications"] {
+			prompt = m.medicationPrompt
+		} else {
+			// Force progress to questions if we've asked about medications
+			m.mu.Lock()
+			conversation.Status = StatusQuestions
+			m.mu.Unlock()
+			prompt = m.questionsPrompt
+		}
+	case StatusQuestions:
+		prompt = m.questionsPrompt
+	case StatusClosing:
+		prompt = m.closingPrompt
+	default:
+		prompt = "Continue the conversation naturally based on the context. Ask appropriate follow-up questions."
+	}
+
+	var conversationContext strings.Builder
+	conversationContext.WriteString("Here is the conversation so far:\n\n")
+
+	for _, exchange := range conversation.Transcript {
+		speakerName := exchange.Speaker
+		if speakerName == "patient" {
+			speakerName = "Patient"
+		} else {
+			speakerName = "Doctor"
+		}
+		conversationContext.WriteString(fmt.Sprintf("%s: %s\n", speakerName, exchange.Text))
+	}
+
+	fullPrompt := fmt.Sprintf(`
+%s
+
+Current conversation stage: %s
+
+%s
+
+Conversation context:
+%s
+
+Based on the conversation so far and the current stage, provide your next response as the AI doctor.
+Keep your response brief and focused on asking the specific question needed for this stage.
+Do not repeat questions that have already been asked.
+Only ask one question at a time.
+`, m.systemPrompt, conversation.Status, prompt, conversationContext.String())
+
+	response, err := m.aiClient.GenerateCompletion(context.Background(), fullPrompt, ai.CompletionOptions{
+		MaxTokens:    150,
+		Temperature:  0.7,
+		SystemPrompt: m.systemPrompt,
+	})
+
+	if err != nil {
+		logger.Error("Error generating AI response", "error", err)
+		return "", fmt.Errorf("error generating response: %w", err)
+	}
+
+	aiResponse := response.Text
+
+	aiResponse = strings.ReplaceAll(aiResponse, "Doctor:", "")
+	aiResponse = strings.ReplaceAll(aiResponse, "AI Doctor:", "")
+	aiResponse = strings.TrimSpace(aiResponse)
+
+	err = m.AddMessage(conversationID, "ai", aiResponse, 1.0)
+	if err != nil {
+		logger.Error("Error adding AI response to conversation", "error", err)
+	}
+
+	m.progressConversation(conversationID)
+
+	return aiResponse, nil
+}
+
+// progressConversation moves the conversation to the next stage with improved logic
 func (m *ConversationManager) progressConversation(conversationID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -551,143 +646,108 @@ func (m *ConversationManager) progressConversation(conversationID string) {
 		"has_name", conversation.PatientName != "",
 		"has_email", conversation.PatientEmail != "")
 
+	// Count exchanges at each stage to prevent getting stuck
+	stageExchangeCount := make(map[ConversationStatus]int)
+
+	for i := 0; i < len(conversation.Transcript); i++ {
+		if conversation.Transcript[i].Speaker == "ai" {
+			// Use the conversation status at the time this message was sent
+			// (This is an approximation since we don't store status with messages)
+			var messageStage ConversationStatus
+
+			// Try to determine the stage based on message content
+			message := strings.ToLower(conversation.Transcript[i].Text)
+			if strings.Contains(message, "email") {
+				messageStage = StatusIdentity
+			} else if strings.Contains(message, "health concern") || strings.Contains(message, "symptoms") {
+				messageStage = StatusSymptoms
+			} else if strings.Contains(message, "medical history") || strings.Contains(message, "health conditions") {
+				messageStage = StatusHistory
+			} else if strings.Contains(message, "medications") || strings.Contains(message, "allergies") {
+				messageStage = StatusMedication
+			} else if i == 0 || strings.Contains(message, "name") {
+				messageStage = StatusGreeting
+			} else {
+				messageStage = StatusQuestions
+			}
+
+			stageExchangeCount[messageStage]++
+		}
+	}
+
+	// Logic for progressing the conversation
 	switch conversation.Status {
 	case StatusGreeting:
-		if conversation.PatientName != "" {
+		if conversation.PatientName != "" || stageExchangeCount[StatusGreeting] >= 2 {
+			// Set a placeholder name if needed
+			if conversation.PatientName == "" {
+				conversation.PatientName = "Patient"
+				conversation.CollectedData["patient_name"] = "Patient"
+			}
 			conversation.Status = StatusIdentity
 			logger.Info("Conversation progressed to identity stage",
 				"conversation_id", conversationID,
 				"patient_name", conversation.PatientName)
-		} else {
-			// Force progression after just 2 exchanges
-			greetingCount := 0
-			for _, exchange := range conversation.Transcript {
-				if exchange.Speaker == "ai" {
-					greetingCount++
-				}
-			}
-			if greetingCount >= 2 {
-				// Set a placeholder name if needed
-				if conversation.PatientName == "" {
-					conversation.PatientName = "Patient"
-					conversation.CollectedData["patient_name"] = "Patient"
-				}
-				conversation.Status = StatusIdentity
-				logger.Info("Forced progression to identity stage",
-					"conversation_id", conversationID,
-					"greeting_count", greetingCount)
-			}
 		}
 
 	case StatusIdentity:
-		if conversation.PatientEmail != "" {
+		if conversation.PatientEmail != "" || stageExchangeCount[StatusIdentity] >= 2 {
+			// Set a placeholder email if needed
+			if conversation.PatientEmail == "" {
+				conversation.PatientEmail = "unknown@example.com"
+				conversation.CollectedData["patient_email"] = "unknown@example.com"
+			}
 			conversation.Status = StatusSymptoms
 			logger.Info("Conversation progressed to symptoms stage",
 				"conversation_id", conversationID,
-				"patient_email", conversation.PatientEmail)
-		} else {
-			// Force progression after just 2 exchanges
-			identityCount := 0
-			for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-				if conversation.Transcript[i].Speaker == "ai" &&
-					conversation.Status == StatusIdentity {
-					identityCount++
-				}
-				if identityCount >= 2 {
-					// Set a placeholder email if needed
-					if conversation.PatientEmail == "" {
-						conversation.PatientEmail = "unknown@example.com"
-						conversation.CollectedData["patient_email"] = "unknown@example.com"
-					}
-					conversation.Status = StatusSymptoms
-					logger.Info("Forced progression to symptoms stage",
-						"conversation_id", conversationID,
-						"identity_count", identityCount)
-					break
-				}
-			}
+				"identity_count", stageExchangeCount[StatusIdentity])
 		}
 
 	case StatusSymptoms:
-		// Progress after just 2 exchanges or if we have symptoms
-		symptomsCount := 0
-		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if conversation.Transcript[i].Speaker == "ai" &&
-				conversation.Status == StatusSymptoms {
-				symptomsCount++
-			}
-			if symptomsCount >= 2 {
-				conversation.Status = StatusHistory
-				logger.Info("Conversation progressed to history stage",
-					"conversation_id", conversationID)
-				break
-			}
+		if stageExchangeCount[StatusSymptoms] >= 1 {
+			conversation.Status = StatusHistory
+			logger.Info("Conversation progressed to history stage",
+				"conversation_id", conversationID)
 		}
 
 	case StatusHistory:
-		// Progress after just 2 exchanges
-		historyCount := 0
-		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if conversation.Transcript[i].Speaker == "ai" &&
-				conversation.Status == StatusHistory {
-				historyCount++
-			}
-			if historyCount >= 2 {
-				conversation.Status = StatusMedication
-				logger.Info("Conversation progressed to medication stage",
-					"conversation_id", conversationID)
-				break
-			}
+		if stageExchangeCount[StatusHistory] >= 1 {
+			conversation.Status = StatusMedication
+			logger.Info("Conversation progressed to medication stage",
+				"conversation_id", conversationID)
 		}
 
 	case StatusMedication:
-		// Progress after just 2 exchanges
-		medicationCount := 0
-		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if conversation.Transcript[i].Speaker == "ai" &&
-				conversation.Status == StatusMedication {
-				medicationCount++
-			}
-			if medicationCount >= 2 {
-				conversation.Status = StatusQuestions
-				logger.Info("Conversation progressed to questions stage",
-					"conversation_id", conversationID)
-				break
-			}
+		if stageExchangeCount[StatusMedication] >= 1 {
+			conversation.Status = StatusQuestions
+			logger.Info("Conversation progressed to questions stage",
+				"conversation_id", conversationID)
 		}
 
 	case StatusQuestions:
-		// Progress after 1-2 exchanges
-		questionCount := 0
-		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if conversation.Transcript[i].Speaker == "ai" &&
-				conversation.Status == StatusQuestions {
-				questionCount++
-			}
-			if questionCount >= 1 {
-				conversation.Status = StatusClosing
-				logger.Info("Conversation progressed to closing stage",
-					"conversation_id", conversationID)
-				break
-			}
+		if stageExchangeCount[StatusQuestions] >= 1 {
+			conversation.Status = StatusClosing
+			logger.Info("Conversation progressed to closing stage",
+				"conversation_id", conversationID)
 		}
 
 	case StatusClosing:
 		// Complete after one closing message and one patient reply
-		closingDelivered := false
+		closingExchanges := 0
 		patientReplied := false
 
 		for i := len(conversation.Transcript) - 1; i >= 0; i-- {
-			if !closingDelivered && conversation.Transcript[i].Speaker == "ai" &&
-				conversation.Status == StatusClosing {
-				closingDelivered = true
-			} else if closingDelivered && conversation.Transcript[i].Speaker == "patient" {
+			if conversation.Transcript[i].Speaker == "ai" &&
+				strings.Contains(strings.ToLower(conversation.Transcript[i].Text), "thank") {
+				closingExchanges++
+			} else if conversation.Transcript[i].Speaker == "patient" && closingExchanges > 0 {
 				patientReplied = true
 				break
 			}
 		}
 
-		if closingDelivered && patientReplied {
+		if (closingExchanges > 0 && patientReplied) || stageExchangeCount[StatusClosing] >= 2 {
+			conversation.Status = StatusComplete
 			logger.Info("Conversation ready for completion",
 				"conversation_id", conversationID)
 		}
