@@ -88,10 +88,24 @@ func (p *TranscriptProcessor) ProcessTranscript(
 		return nil, fmt.Errorf("failed to extract patient data: %w", err)
 	}
 
+	// Post-process and clean up patient data
+	patientData = sanitizePatientData(patientData)
+
 	// Generate a case ID if needed
 	if patientData.ID == "" {
 		patientData.ID = fmt.Sprintf("P%d", time.Now().Unix())
 	}
+
+	// Log the processed data
+	logger.Info("Processed patient data",
+		"case_id", patientData.ID,
+		"name", patientData.Name,
+		"age", patientData.Age,
+		"gender", patientData.Gender,
+		"symptoms", strings.Join(patientData.Symptoms, ", "),
+		"conditions", strings.Join(patientData.Conditions, ", "),
+		"medications", strings.Join(patientData.Medications, ", "),
+		"allergies", strings.Join(patientData.Allergies, ", "))
 
 	// Store the case
 	if err := p.caseRepository.StoreCase(patientData.ID, patientDataToMap(patientData), false); err != nil {
@@ -146,6 +160,94 @@ func (p *TranscriptProcessor) ProcessTranscript(
 	}
 
 	return result, nil
+}
+
+// sanitizePatientData cleans and validates the patient data to ensure it's properly categorized
+func sanitizePatientData(data PatientData) PatientData {
+	// Check if a medication was mistakenly put in gender
+	if stringInSlice(strings.ToLower(data.Gender), []string{"male", "female", "other"}) == false {
+		// If gender doesn't match expected values, check if it appears to be a medication
+		if data.Gender != "" {
+			// Move the value to medications if it's not empty
+			data.Medications = append(data.Medications, data.Gender)
+		}
+		// Set proper gender if available in medications
+		if stringInSlice("male", lowercaseSlice(data.Medications)) {
+			data.Gender = "male"
+		} else if stringInSlice("female", lowercaseSlice(data.Medications)) {
+			data.Gender = "female"
+		} else {
+			data.Gender = "" // Reset to empty if invalid
+		}
+	}
+	
+	// Remove any medication entries that match gender values
+	filteredMeds := make([]string, 0)
+	for _, med := range data.Medications {
+		if !stringInSlice(strings.ToLower(med), []string{"male", "female", "other"}) {
+			filteredMeds = append(filteredMeds, med)
+		}
+	}
+	data.Medications = filteredMeds
+	
+	// Clean empty entries
+	data.Symptoms = removeEmptyStrings(data.Symptoms)
+	data.Conditions = removeEmptyStrings(data.Conditions)
+	data.Medications = removeEmptyStrings(data.Medications)
+	data.Allergies = removeEmptyStrings(data.Allergies)
+	
+	// Remove "none" entries
+	data.Medications = removeStringFromSlice(data.Medications, "none")
+	data.Allergies = removeStringFromSlice(data.Allergies, "none")
+	data.Symptoms = removeStringFromSlice(data.Symptoms, "none")
+	data.Conditions = removeStringFromSlice(data.Conditions, "none")
+	
+	return data
+}
+
+// Helper functions for data sanitization
+
+// stringInSlice checks if a string is in a slice (case insensitive)
+func stringInSlice(str string, list []string) bool {
+	strLower := strings.ToLower(str)
+	for _, v := range list {
+		if strings.ToLower(v) == strLower {
+			return true
+		}
+	}
+	return false
+}
+
+// lowercaseSlice converts all strings in a slice to lowercase
+func lowercaseSlice(strs []string) []string {
+	result := make([]string, len(strs))
+	for i, s := range strs {
+		result[i] = strings.ToLower(s)
+	}
+	return result
+}
+
+// removeEmptyStrings removes empty strings from a slice
+func removeEmptyStrings(strs []string) []string {
+	result := make([]string, 0)
+	for _, s := range strs {
+		if strings.TrimSpace(s) != "" {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// removeStringFromSlice removes all occurrences of a string from a slice (case insensitive)
+func removeStringFromSlice(strs []string, remove string) []string {
+	result := make([]string, 0)
+	removeLower := strings.ToLower(remove)
+	for _, s := range strs {
+		if strings.ToLower(s) != removeLower {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // startWorkflowViaAPI starts a workflow using the API endpoint
@@ -214,15 +316,29 @@ func (p *TranscriptProcessor) extractPatientData(
 	transcript string,
 ) (PatientData, error) {
 	promptTemplate := `
-Extract all patient information from the following medical conversation transcript.
+Extract all patient information from the following medical conversation transcript. The conversation follows a specific sequence of questions and answers.
+
+The questions are asked in this order:
+1. What is your name?
+2. How old are you?
+3. What is your gender? (Male, female, or other)
+4. What symptoms are you experiencing?
+5. Do you have any existing medical conditions?
+6. What medications are you currently taking?
+7. Do you have any allergies to medications or other substances?
+
+Analyze EACH QUESTION with its MATCHING ANSWER to accurately extract the information.
+
 I need structured data for a medical system. Include the following fields:
-- name: The patient's full name
-- age: The patient's age as a number
-- gender: The patient's gender (male, female, or other)
-- symptoms: All symptoms mentioned (as an array of strings)
-- conditions: All pre-existing medical conditions mentioned (as an array of strings)
-- medications: All medications the patient is taking (as an array of strings)
-- allergies: All allergies mentioned (as an array of strings)
+- name: The patient's full name from question 1
+- age: The patient's age as a number from question A2
+- gender: The patient's gender (male, female, or other) from question 3
+- symptoms: All symptoms mentioned in question 4 (as an array of strings)
+- conditions: All pre-existing medical conditions mentioned in question 5 (as an array of strings)
+- medications: All medications mentioned in question 6 (as an array of strings)
+- allergies: All allergies mentioned in question 7 (as an array of strings)
+
+IMPORTANT: Match each answer with the correct corresponding question. Do NOT use answers from one question to fill fields for another question.
 
 If any field is not mentioned or unclear, use empty values (empty string, 0, or empty array).
 Return ONLY a valid JSON object containing all these fields, even if they're empty.
@@ -272,6 +388,15 @@ Response must be valid JSON only.`
 	if extractedData.ID == "" {
 		extractedData.ID = fmt.Sprintf("P%d", time.Now().Unix())
 	}
+
+	logger.Info("Extracted raw patient data (pre-cleanup)",
+		"name", extractedData.Name,
+		"age", extractedData.Age,
+		"gender", extractedData.Gender,
+		"symptoms_count", len(extractedData.Symptoms),
+		"conditions_count", len(extractedData.Conditions),
+		"medications_count", len(extractedData.Medications),
+		"allergies_count", len(extractedData.Allergies))
 
 	return extractedData, nil
 }

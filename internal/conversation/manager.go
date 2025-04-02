@@ -107,7 +107,7 @@ func (m *ConversationManager) GetConversation(conversationID string) (*Conversat
 	return conversation, exists
 }
 
-// AddMessage adds a message to the conversation and advances question index for patient messages
+// AddMessage adds a message to the conversation but does NOT automatically advance question index
 func (m *ConversationManager) AddMessage(conversationID string, messageType MessageType, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,18 +125,16 @@ func (m *ConversationManager) AddMessage(conversationID string, messageType Mess
 
 	conversation.Transcript = append(conversation.Transcript, message)
 
-	// If this is a patient message, advance to the next question
-	if messageType == MessageTypePatient {
-		if conversation.QuestionIndex < len(m.questions)-1 {
-			conversation.QuestionIndex++
-		}
-	}
-
+	// Important: We don't automatically advance the question index here
+	// That's handled explicitly by the call service to maintain control
+	// of the conversation flow without skipping questions
+	
 	logger.Info("Added message to conversation",
 		"conversation_id", conversationID,
 		"message_type", string(messageType),
 		"content_length", len(content),
-		"question_index", conversation.QuestionIndex)
+		"question_index", conversation.QuestionIndex,  // This will not change here
+		"transcript_length", len(conversation.Transcript))
 
 	return nil
 }
@@ -191,14 +189,89 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 		return "", fmt.Errorf("conversation not found: %s", conversationID)
 	}
 
-	var formatted string
-	for _, message := range conversation.Transcript {
-		speaker := "Medical Assistant"
-		if message.Type == MessageTypePatient {
-			speaker = "Patient"
+	// Create a mapped representation of the transcript to ensure questions and answers line up
+	// This ensures we maintain the correct question/answer pairing
+	var questions []string
+	answers := make(map[int]string)
+	
+	// First, identify all the questions in order
+	for i, msg := range conversation.Transcript {
+		if msg.Type == MessageTypeAI {
+			// Check if this question matches one of our predefined questions
+			for questionIdx, predefinedQuestion := range m.questions {
+				if msg.Content == predefinedQuestion {
+					questions = append(questions, fmt.Sprintf("Q%d: %s", questionIdx+1, msg.Content))
+					
+					// Check if there's a patient response following this question
+					if i+1 < len(conversation.Transcript) && 
+						conversation.Transcript[i+1].Type == MessageTypePatient {
+						answers[questionIdx] = conversation.Transcript[i+1].Content
+					}
+					break
+				}
+			}
 		}
-		formatted += speaker + ": " + message.Content + "\n\n"
 	}
+	
+	// Now format the Q&A pairs explicitly by question number
+	var formatted string
+	formatted = "CONVERSATION TRANSCRIPT WITH EXPLICIT QUESTION/ANSWER PAIRS:\n\n"
+	
+	for i, questionText := range m.questions {
+		formatted += fmt.Sprintf("Question %d: %s\n", i+1, questionText)
+		
+		if answer, exists := answers[i]; exists {
+			formatted += fmt.Sprintf("Answer %d: %s\n\n", i+1, answer)
+		} else {
+			formatted += "Answer: [No response provided]\n\n"
+		}
+	}
+	
+	// Add guidance for the extraction
+	formatted += "\nEXTRACTION INSTRUCTIONS:\n"
+	formatted += "- Extract name from Question 1\n"
+	formatted += "- Extract age from Question 2\n"
+	formatted += "- Extract gender from Question 3\n"
+	formatted += "- Extract symptoms from Question 4\n"
+	formatted += "- Extract medical conditions from Question 5\n"
+	formatted += "- Extract medications from Question 6\n"
+	formatted += "- Extract allergies from Question 7\n"
+	formatted += "\nPlease match answers exactly with their corresponding questions when extracting data."
 
 	return formatted, nil
+}
+
+// GetQuestions returns the list of questions in the conversation flow
+func (m *ConversationManager) GetQuestions() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// Return a copy of the questions slice to avoid external modifications
+	questionsCopy := make([]string, len(m.questions))
+	copy(questionsCopy, m.questions)
+	
+	return questionsCopy
+}
+
+// GetQuestionByIndex returns a specific question by its index
+func (m *ConversationManager) GetQuestionByIndex(conversationID string, index int) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// Validate conversation exists
+	_, exists := m.activeConversations[conversationID]
+	if !exists {
+		return "", fmt.Errorf("conversation not found: %s", conversationID)
+	}
+	
+	// Check if index is valid
+	if index < 0 || index >= len(m.questions) {
+		// Return the last question as a fallback
+		if len(m.questions) > 0 {
+			return m.questions[len(m.questions)-1], nil
+		}
+		return "", fmt.Errorf("invalid question index: %d", index)
+	}
+	
+	return m.questions[index], nil
 }

@@ -131,44 +131,58 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		"input", speechInput,
 		"input_length", len(speechInput))
 
-	// If no speech was detected or very short (likely noise)
+	// Always continue even with empty input - just use a placeholder
 	if speechInput == "" || len(speechInput) < 2 {
-		logger.Warn("Empty or very short speech input received", "call_sid", callSID)
-
-		// Just ask them to repeat rather than reusing the same question
-		repeatTwiML := generateRepeatTwiML(callSID, c.callService.GetBaseURL())
-		ctx.Header("Content-Type", "text/xml")
-		ctx.String(http.StatusOK, repeatTwiML)
-		return
+		speechInput = "No response provided" // Descriptive placeholder
+		logger.Warn("Empty or very short speech input, using placeholder", 
+			"call_sid", callSID,
+			"original_input", speechInput)
 	}
 
 	// Process the speech input - this will also advance the question index
+	// Even if there's an error, we still want the call to continue
 	response, err := c.callService.ProcessSpeechInput(callSID, speechInput)
 	if err != nil {
-		logger.Error("Failed to process speech input", "error", err, "call_sid", callSID)
+		logger.Error("Failed to process speech input, using fallback", 
+			"error", err, 
+			"call_sid", callSID)
 
-		// Generate an error response
-		twiML := generateErrorTwiML("I'm having trouble understanding. Let's try a different question.")
-		ctx.Header("Content-Type", "text/xml")
-		ctx.String(http.StatusOK, twiML)
-		return
+		// Use a simple continuation message instead of stopping the flow
+		response = "Let's continue to the next question."
+		
+		// Try to get the current state so we can continue
+		// Any errors here are non-fatal - we'll still proceed with the simple response
+		currentState, stateErr := c.callService.GetCallState(callSID)
+		if stateErr == nil && currentState != nil {
+			if nextQuestion, qErr := c.callService.GetNextQuestionForCall(callSID); qErr == nil && nextQuestion != "" {
+				response = nextQuestion // Use the actual next question if available
+			}
+		}
 	}
 
-	// Generate audio for the response
+	// Try to generate audio, but have a solid fallback if it fails
 	_, audioErr := c.callService.GenerateAudioResponse(callSID, response)
 	if audioErr != nil {
-		logger.Error("Failed to generate audio", "error", audioErr, "call_sid", callSID)
+		logger.Error("Failed to generate audio, using TTS fallback", 
+			"error", audioErr, 
+			"call_sid", callSID,
+			"response_text", response)
 
-		// Fall back to Twilio's text-to-speech
+		// Fall back to Twilio's text-to-speech with the response
 		twiML := generateTwiMLWithSay(response, callSID, c.callService.GetBaseURL())
 		ctx.Header("Content-Type", "text/xml")
 		ctx.String(http.StatusOK, twiML)
 		return
 	}
 
-	// Use the generated audio
+	// Use the generated audio with longer timeouts for better user experience
 	audioURL := c.callService.GetBaseURL() + "/api/call/audio/" + callSID
 	twiML := generateTwiMLWithAudio(audioURL, callSID, c.callService.GetBaseURL())
+	
+	logger.Info("Sending audio response",
+		"call_sid", callSID,
+		"audio_url", audioURL,
+		"response_text", response)
 
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiML)
@@ -251,7 +265,8 @@ func generateTwiMLWithSay(message, callSID, baseURL string) string {
 			"input":         "speech",
 			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", baseURL, callSID),
 			"language":      "en-US",
-			"speechTimeout": "auto",
+			"speechTimeout": "5",  // 5 seconds of silence before timing out
+			"timeout":       "15", // 15 seconds total for input
 		}),
 	)
 }
@@ -264,7 +279,8 @@ func generateTwiMLWithAudio(audioURL, callSID, baseURL string) string {
 			"input":         "speech",
 			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", baseURL, callSID),
 			"language":      "en-US",
-			"speechTimeout": "auto",
+			"speechTimeout": "5",  // 5 seconds of silence before timing out
+			"timeout":       "15", // 15 seconds total for input
 		}),
 	)
 }

@@ -173,10 +173,21 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 	// Update activity timestamp
 	session.LastActivity = time.Now()
 	conversationID := session.ConversationID
+	// Store current question index before we process the message
+	currentQuestionIndex := session.QuestionCounter
+
+	// Get total questions for validation
+	totalQuestions := len(s.conversationManager.GetQuestions())
 	s.mu.Unlock()
 
-	// Add the patient's message to the conversation
-	// This will also advance to the next question index internally
+	// Log detailed information about the current state
+	logger.Info("Current question state",
+		"call_sid", callSID,
+		"current_question_index", currentQuestionIndex,
+		"total_questions", totalQuestions,
+		"conversation_id", conversationID)
+
+	// Simply store the patient's response - DO NOT validate it during the call
 	if err := s.conversationManager.AddMessage(conversationID, conversation.MessageTypePatient, speechText); err != nil {
 		logger.Error("Failed to add patient message",
 			"error", err,
@@ -184,33 +195,63 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 		return "I'm sorry, we're experiencing technical difficulties.", err
 	}
 
-	// Get the next question based on the updated index
-	nextQuestion, err := s.conversationManager.GetNextQuestion(conversationID)
-	if err != nil {
-		logger.Error("Failed to get next question",
-			"error", err,
-			"conversation_id", conversationID)
-		return "I'm sorry, we're experiencing technical difficulties.", err
+	// Get the next question based on simple sequential progression
+	// Strictly advance to the next question - no skipping, no logic
+	nextQuestionIndex := currentQuestionIndex + 1
+
+	// Make sure we don't go beyond the available questions
+	// Force continue through ALL questions before ending
+	if nextQuestionIndex >= totalQuestions {
+		logger.Info("Reached last question, staying at final goodbye",
+			"call_sid", callSID,
+			"current_index", nextQuestionIndex,
+			"max_questions", totalQuestions)
+		nextQuestionIndex = totalQuestions - 1
 	}
 
-	// Add the AI's response to the conversation
+	// Log which question we're moving to
+	logger.Info("Moving to next question in sequence",
+		"call_sid", callSID,
+		"from_question", currentQuestionIndex,
+		"to_question", nextQuestionIndex,
+		"total_questions", totalQuestions)
+
+	// Get the specific next question from our fixed list
+	questionsList := s.conversationManager.GetQuestions()
+	nextQuestion := questionsList[nextQuestionIndex]
+
+	// Double-log the exact question text to ensure correctness
+	logger.Info("Next question content",
+		"call_sid", callSID,
+		"question_index", nextQuestionIndex,
+		"question_text", nextQuestion)
+
+	// Add the AI's response to the conversation with the exact question text
 	if err := s.conversationManager.AddMessage(conversationID, conversation.MessageTypeAI, nextQuestion); err != nil {
 		logger.Error("Failed to add AI message",
 			"error", err,
 			"conversation_id", conversationID)
 	}
 
-	// Increment question counter
+	// Update the session question counter
 	s.mu.Lock()
-	session.QuestionCounter++
+	session.QuestionCounter = nextQuestionIndex
+	// Store for local use and logging
 	questionCount := session.QuestionCounter
 	s.mu.Unlock()
 
-	// Check if we should end the call (after the closing question)
-	if questionCount >= 8 { // After the goodbye message
+	// ONLY try to end the call after completing the VERY LAST question (goodbye)
+	// This ensures all questions will be asked in order
+	if questionCount == totalQuestions-1 { // This is definitely the last question
+		// Log that we've reached the final question
+		logger.Info("Reached final goodbye question - will end call soon",
+			"call_sid", callSID,
+			"question_index", questionCount,
+			"total_questions", totalQuestions)
+
 		go func() {
-			// Wait a bit to let the goodbye message play
-			time.Sleep(10 * time.Second)
+			// Wait longer to let the goodbye message play fully
+			time.Sleep(15 * time.Second)
 			logger.Info("Auto-ending call after final question",
 				"call_sid", callSID,
 				"question_counter", questionCount)
@@ -225,7 +266,8 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 	logger.Info("Generated next response",
 		"call_sid", callSID,
 		"response_length", len(nextQuestion),
-		"question_counter", questionCount)
+		"question_counter", questionCount,
+		"question_text", nextQuestion)
 
 	return nextQuestion, nil
 }
@@ -281,6 +323,12 @@ func (s *Service) processCallResults(callSID string) {
 	conversationID := session.ConversationID
 	s.mu.RUnlock()
 
+	// Make sure the conversation is marked as complete
+	if err := s.conversationManager.CompleteConversation(conversationID); err != nil {
+		logger.Warn("Error ensuring conversation is marked complete", "error", err)
+		// Continue anyway as this is non-fatal
+	}
+
 	// Get the formatted transcript
 	formattedTranscript, err := s.conversationManager.FormatTranscriptForProcessing(conversationID)
 	if err != nil {
@@ -290,19 +338,39 @@ func (s *Service) processCallResults(callSID string) {
 
 	// Process the transcript using the API-based processor
 	if s.transcriptProcessor != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second) // Increased timeout for processing
 		defer cancel()
+
+		logger.Info("Starting transcript processing",
+			"conversation_id", conversationID,
+			"transcript_length", len(formattedTranscript))
 
 		result, err := s.transcriptProcessor.ProcessTranscript(ctx, conversationID, formattedTranscript)
 		if err != nil {
 			logger.Error("Failed to process transcript", "error", err, "conversation_id", conversationID)
 		} else {
+			// Log successful processing with detailed information
 			logger.Info("Successfully processed call results",
 				"call_sid", callSID,
+				"conversation_id", conversationID,
 				"case_id", result.CaseID,
 				"patient_name", result.PatientData.Name,
-				"workflow_id", result.WorkflowID)
+				"workflow_id", result.WorkflowID,
+				"patient_symptoms_count", len(result.PatientData.Symptoms),
+				"patient_conditions_count", len(result.PatientData.Conditions))
+
+			// Optional: Add more detailed logging about the extracted data
+			logger.Info("Extracted patient data",
+				"name", result.PatientData.Name,
+				"age", result.PatientData.Age,
+				"gender", result.PatientData.Gender,
+				"symptoms", strings.Join(result.PatientData.Symptoms, ", "),
+				"conditions", strings.Join(result.PatientData.Conditions, ", "),
+				"medications", strings.Join(result.PatientData.Medications, ", "),
+				"allergies", strings.Join(result.PatientData.Allergies, ", "))
 		}
+	} else {
+		logger.Warn("No transcript processor available - skipping processing", "conversation_id", conversationID)
 	}
 
 	// Clean up the session
@@ -322,6 +390,45 @@ func (s *Service) GetWebhookHandler() *twilio.WebhookHandler {
 // GetBaseURL returns the base URL for callbacks
 func (s *Service) GetBaseURL() string {
 	return s.baseURL
+}
+
+// GetCallState returns the current state of a call session
+func (s *Service) GetCallState(callSID string) (*CallSession, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	session, exists := s.activeSessions[callSID]
+	if !exists {
+		return nil, fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	// Return a copy to prevent concurrent modification issues
+	sessionCopy := *session
+	return &sessionCopy, nil
+}
+
+// GetNextQuestionForCall returns the next question for a call without advancing the state
+func (s *Service) GetNextQuestionForCall(callSID string) (string, error) {
+	s.mu.RLock()
+	session, exists := s.activeSessions[callSID]
+	if !exists {
+		s.mu.RUnlock()
+		return "", fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	// Get question index and conversation ID safely
+	questionIndex := session.QuestionCounter
+	s.mu.RUnlock()
+
+	// Get all questions and check if we're in range
+	questions := s.conversationManager.GetQuestions()
+	if questionIndex < 0 || questionIndex >= len(questions) {
+		// If out of range, default to the last goodbye message
+		return questions[len(questions)-1], nil
+	}
+
+	// Return the current question text
+	return questions[questionIndex], nil
 }
 
 // registerWebhookHandlers sets up the Twilio webhook handlers
@@ -370,12 +477,13 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 
 		// Create a new session
 		session = &CallSession{
-			CallSID:        callSID,
-			ConversationID: conv.ID,
-			PatientPhone:   patientPhone,
-			IsActive:       true,
-			StartTime:      time.Now(),
-			LastActivity:   time.Now(),
+			CallSID:         callSID,
+			ConversationID:  conv.ID,
+			PatientPhone:    patientPhone,
+			IsActive:        true,
+			StartTime:       time.Now(),
+			LastActivity:    time.Now(),
+			QuestionCounter: 0, // Explicitly start at first question
 		}
 		s.activeSessions[callSID] = session
 
@@ -389,10 +497,10 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	}
 	s.mu.Unlock()
 
-	// Get the initial question (always the first one for a new call)
-	questionText, err := s.conversationManager.GetNextQuestion(session.ConversationID)
+	// Always get the first question for a new call
+	questionText, err := s.conversationManager.GetQuestionByIndex(session.ConversationID, 0)
 	if err != nil {
-		logger.Error("Failed to get question", "error", err)
+		logger.Error("Failed to get initial question", "error", err)
 		return twilioErrorResponse("We're experiencing technical difficulties. Please try again later."), nil
 	}
 
@@ -400,6 +508,13 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	if err := s.conversationManager.AddMessage(session.ConversationID, conversation.MessageTypeAI, questionText); err != nil {
 		logger.Error("Failed to add AI message", "error", err)
 	}
+
+	// Log which question we're asking with additional details
+	logger.Info("Starting call with initial question",
+		"call_sid", callSID,
+		"question_index", 0,
+		"question_text", questionText,
+		"total_questions", len(s.conversationManager.GetQuestions()))
 
 	// Try to generate audio for the response
 	_, err = s.GenerateAudioResponse(callSID, questionText)
@@ -412,7 +527,8 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 				"input":         "speech",
 				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
 				"language":      "en-US",
-				"speechTimeout": "auto",
+				"speechTimeout": "5",  // 5 seconds of silence before timing out
+				"timeout":       "15", // 15 seconds total for input
 			}),
 		), nil
 	}
@@ -420,13 +536,15 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	// Audio generation succeeded, use the audio URL
 	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
 
+	// Configure a more tolerant speech gathering setup with longer timeouts
 	return twilio.GenerateTwiML(
 		twilio.PlayAction(audioURL),
 		twilio.GatherAction("", map[string]string{
 			"input":         "speech",
 			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
 			"language":      "en-US",
-			"speechTimeout": "auto",
+			"speechTimeout": "5",  // 5 seconds of silence before timing out
+			"timeout":       "15", // 15 seconds total for input
 		}),
 	), nil
 }
