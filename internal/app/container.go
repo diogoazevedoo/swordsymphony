@@ -1,8 +1,6 @@
 package app
 
 import (
-	"time"
-
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/call"
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/deepgram"
@@ -13,6 +11,7 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/conversation"
 	"github.com/diogoazevedoo/swordsymphony/internal/knowledge"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
+	"github.com/diogoazevedoo/swordsymphony/internal/processing"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/postgres"
@@ -32,7 +31,8 @@ type Container struct {
 	DeepgramClient      *deepgram.Client
 	EmailSender         *email.Sender
 	ConversationManager *conversation.ConversationManager
-	WorkflowService     *conversation.WorkflowService
+	WorkflowService     *workflow.WorkflowService
+	TranscriptProcessor *processing.TranscriptProcessor
 	CallService         *call.Service
 }
 
@@ -122,7 +122,7 @@ func (c *Container) initRepositories() error {
 	return nil
 }
 
-// Initialize communication services (Twilio, ElevenLabs, Deepgram, Email)
+// Initialize communication services
 func (c *Container) initCommunicationServices() error {
 	// Initialize Twilio client
 	c.TwilioClient = twilio.NewClient(
@@ -170,35 +170,41 @@ func (c *Container) initCommunicationServices() error {
 
 // Initialize conversation and workflow services
 func (c *Container) initConversationServices() error {
-	// Initialize conversation manager
-	c.ConversationManager = conversation.NewConversationManager(c.AIClient)
+	// Initialize conversation manager (simplified version)
+	c.ConversationManager = conversation.NewConversationManager()
 
-	// Initialize workflow service
+	// Initialize workflow service (still needed for other parts of the app)
 	workflowEngine := workflow.NewWorkflowEngine()
-	workflowService := workflow.NewWorkflowService(workflowEngine, c.Config.Medical.DataPath)
+	workflowService := workflow.NewWorkflowService(workflowEngine, "./configs/workflows")
 
 	if err := workflowService.Initialize(); err != nil {
 		logger.Warn("Failed to initialize workflow service", "error", err)
 	}
 
-	c.WorkflowService = conversation.NewWorkflowService(workflowEngine, workflowService)
+	// Simply use the Twilio webhook base URL for the transcript processor
+	// This URL is already configured correctly for external access
+	baseURL := c.Config.Twilio.WebhookBaseURL
 
-	// Initialize call service
+	// Create transcript processor using the same base URL
+	c.TranscriptProcessor = processing.NewTranscriptProcessor(
+		c.AIClient,
+		c.CaseRepo,
+		c.ResultRepo,
+		baseURL,
+	)
+
+	// Initialize call service with the same base URL
 	c.CallService = call.NewService(
 		c.TwilioClient,
 		c.ElevenLabsClient,
 		c.DeepgramClient,
-		c.EmailSender,
 		c.ConversationManager,
-		c.WorkflowService,
-		c.ResultRepo,
-		c.AIClient,
-		c.Config.Twilio.WebhookBaseURL,
+		c.TranscriptProcessor,
+		baseURL,
 	)
 
-	// Start the cleanup scheduler for call sessions
-	c.CallService.StartCleanupScheduler(5 * time.Minute)
+	c.WorkflowService = workflowService
 
-	logger.Info("Conversation services initialized")
+	logger.Info("Conversation services initialized", "base_url", baseURL)
 	return nil
 }
