@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -196,6 +197,9 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		return nil, fmt.Errorf("no session found for call %s", callSID)
 	}
 
+	// Ensure we have all medical data before proceeding with workflow
+	s.processPatientDataForWorkflow(session.ConversationID)
+
 	// Process the conversation data
 	processedData, err := s.conversationManager.ProcessConversationData(session.ConversationID)
 	if err != nil {
@@ -225,35 +229,63 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID,
 		"case_id", caseID,
-		"data_keys", getMapKeys(patientData))
+		"data_keys", getMapKeys(patientData),
+		"name", patientData["name"],
+		"age", patientData["age"],
+		"gender", patientData["gender"],
+		"symptoms_count", len(patientData["symptoms"].([]string)))
 
-	// Store the case
-	var resultRepo repository.ResultRepository
+	// Store the case - make sure we have a proper repository
+	var resultRepo repository.ResultRepository = s.resultRepository
 
-	// Use the provided result repository if available
-	if s.resultRepository != nil {
-		resultRepo = s.resultRepository
-
-		// We'll attempt to store the case first
-		if caseRepo, ok := s.resultRepository.(repository.CaseRepository); ok {
+	// Store the case first to ensure it exists
+	if resultRepo != nil {
+		if caseRepo, ok := resultRepo.(repository.CaseRepository); ok {
 			err := caseRepo.StoreCase(caseID, patientData, false)
 			if err != nil {
 				logger.Error("Failed to store case with result repository", "error", err)
 			} else {
 				logger.Info("Successfully stored case with result repository", "case_id", caseID)
 			}
+		} else {
+			logger.Warn("Result repository does not implement CaseRepository interface",
+				"case_id", caseID)
 		}
+	} else {
+		logger.Warn("No result repository available to store case", "case_id", caseID)
 	}
 
-	// Select standard diagnostic workflow by default
+	// Select workflow based on patient data
 	workflowID := "standard_diagnostic_workflow"
 
 	// Try to select a workflow if the service is available
 	if s.workflowService != nil {
-		selectedID, err := s.workflowService.SelectWorkflow(patientData)
-		if err == nil && selectedID != "" {
-			workflowID = selectedID
+		// Multiple attempts to select workflow with retries
+		for attempt := 0; attempt < 3; attempt++ {
+			selectedID, err := s.workflowService.SelectWorkflow(patientData)
+			if err == nil && selectedID != "" {
+				workflowID = selectedID
+				logger.Info("Selected workflow based on patient data",
+					"workflow_id", workflowID,
+					"case_id", caseID,
+					"attempt", attempt+1)
+				break
+			}
+
+			if attempt < 2 {
+				logger.Warn("Failed to select workflow, retrying",
+					"error", err,
+					"attempt", attempt+1)
+				time.Sleep(500 * time.Millisecond)
+			} else {
+				logger.Warn("Failed to select workflow after retries, using default",
+					"error", err,
+					"default_workflow", workflowID)
+			}
 		}
+	} else {
+		logger.Warn("No workflow service available, using default workflow",
+			"default_workflow", workflowID)
 	}
 
 	// Create input data for the workflow
@@ -265,55 +297,112 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 	// Initialize UUID for the instance
 	instanceID := uuid.Nil
 
-	// Start the workflow via API
-	workflowURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", s.baseURL, workflowID)
-	jsonData, err := json.Marshal(inputData)
+	// Start the workflow via API with retries
+	for attempt := 0; attempt < 3; attempt++ {
+		workflowURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", s.baseURL, workflowID)
+		jsonData, err := json.Marshal(inputData)
+		if err != nil {
+			logger.Error("Failed to marshal workflow input data", "error", err)
+			break
+		}
 
-	if err == nil {
+		// Create the request with proper content type
 		req, err := http.NewRequest("POST", workflowURL, bytes.NewBuffer(jsonData))
-		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Do(req)
+		if err != nil {
+			logger.Error("Failed to create workflow request", "error", err)
+			break
+		}
 
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					logger.Info("Successfully started workflow via API",
-						"workflow_id", workflowID, "case_id", caseID)
+		req.Header.Set("Content-Type", "application/json")
 
-					// Try to get the instance ID
-					var apiResponse struct {
-						InstanceID string `json:"instance_id"`
-					}
-					if json.NewDecoder(resp.Body).Decode(&apiResponse) == nil && apiResponse.InstanceID != "" {
-						if id, err := uuid.Parse(apiResponse.InstanceID); err == nil {
-							instanceID = id
-						}
-					}
+		// Use a client with reasonable timeout
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, err := client.Do(req)
+
+		if err != nil {
+			logger.Error("Failed to send workflow request",
+				"error", err,
+				"attempt", attempt+1)
+
+			if attempt < 2 {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
+
+		defer resp.Body.Close()
+
+		// Check if the request was successful
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			logger.Info("Successfully started workflow via API",
+				"workflow_id", workflowID,
+				"case_id", caseID,
+				"status_code", resp.StatusCode,
+				"attempt", attempt+1)
+
+			// Try to get the instance ID from the response
+			var apiResponse struct {
+				InstanceID string `json:"instance_id"`
+			}
+
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&apiResponse); decodeErr != nil {
+				logger.Warn("Failed to decode workflow response", "error", decodeErr)
+			} else if apiResponse.InstanceID != "" {
+				if id, parseErr := uuid.Parse(apiResponse.InstanceID); parseErr == nil {
+					instanceID = id
+					logger.Info("Got workflow instance ID", "instance_id", instanceID)
+				} else {
+					logger.Warn("Failed to parse instance ID", "error", parseErr)
 				}
+			} else {
+				logger.Warn("No instance ID in workflow response")
+			}
+
+			// Success - break the retry loop
+			break
+		} else {
+			// Log details about unsuccessful response
+			respBody, _ := io.ReadAll(resp.Body)
+			logger.Error("Failed to start workflow via API",
+				"workflow_id", workflowID,
+				"case_id", caseID,
+				"status_code", resp.StatusCode,
+				"response", string(respBody),
+				"attempt", attempt+1)
+
+			if attempt < 2 {
+				time.Sleep(1 * time.Second)
+				continue
 			}
 		}
 	}
 
-	// Extract diagnosis and treatment data from result repository
+	// Initialize empty diagnosis and treatment data
 	diagnosisData := make(map[string]any)
 	treatmentData := make(map[string]any)
 
-	// Try to get results if available
+	// Try to get existing results if available
 	if resultRepo != nil {
 		results, err := resultRepo.GetResultsByCaseID(caseID)
-		if err == nil && results != nil {
-			if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
+		if err != nil {
+			logger.Warn("Failed to get existing results", "error", err, "case_id", caseID)
+		} else if results != nil {
+			// Extract diagnosis data
+			if diagnosis, ok := results["diagnosis"].(map[string]any); ok && len(diagnosis) > 0 {
 				diagnosisData = diagnosis
+				logger.Info("Found existing diagnosis data", "case_id", caseID)
 			}
-			if treatment, ok := results["treatment_plan"].(map[string]any); ok {
+
+			// Extract treatment data
+			if treatment, ok := results["treatment_plan"].(map[string]any); ok && len(treatment) > 0 {
 				treatmentData = treatment
+				logger.Info("Found existing treatment data", "case_id", caseID)
 			}
 		}
 	}
 
-	// Store basic results even if workflow fails
+	// Prepare result data structure with all available information
 	resultData := map[string]any{
 		"patient_data":   patientData,
 		"diagnosis":      diagnosisData,
@@ -323,16 +412,33 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		"completed_at":   time.Now().Format(time.RFC3339),
 	}
 
-	// Store results
+	// Store results, even if we don't have a workflow instance yet
 	if resultRepo != nil {
-		if err := resultRepo.StoreResults(caseID, resultData); err != nil {
-			logger.Error("Failed to store call results", "error", err, "case_id", caseID)
-		} else {
-			logger.Info("Stored call results", "case_id", caseID)
+		// Try storing results with retry
+		var storeErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			storeErr = resultRepo.StoreResults(caseID, resultData)
+			if storeErr == nil {
+				logger.Info("Successfully stored call results",
+					"case_id", caseID,
+					"attempt", attempt+1)
+				break
+			}
+
+			logger.Error("Failed to store call results",
+				"error", storeErr,
+				"case_id", caseID,
+				"attempt", attempt+1)
+
+			if attempt < 2 {
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
+	} else {
+		logger.Warn("No result repository available to store results", "case_id", caseID)
 	}
 
-	// Create the result object
+	// Create and return the result object
 	callResult := &CallResult{
 		CallSID:        callSID,
 		ConversationID: session.ConversationID,
@@ -343,6 +449,12 @@ func (s *Service) ProcessCallResults(callSID string) (*CallResult, error) {
 		InstanceID:     instanceID,
 		CompletedAt:    time.Now(),
 	}
+
+	logger.Info("Completed call result processing successfully",
+		"call_sid", callSID,
+		"case_id", caseID,
+		"workflow_id", workflowID,
+		"has_instance_id", instanceID != uuid.Nil)
 
 	return callResult, nil
 }
@@ -560,7 +672,6 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	s.mu.Lock()
 	session, exists := s.activeStreamingSessions[callSID]
 	if !exists {
-		conversationID := fmt.Sprintf("conv_%d", time.Now().UnixNano())
 		patientPhone := event.From
 
 		logger.Info("Creating new conversation for call",
@@ -576,7 +687,7 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 			), nil
 		}
 
-		conversationID = conversation.ID
+		conversationID := conversation.ID
 		logger.Info("Created new conversation",
 			"conversation_id", conversationID,
 			"call_sid", callSID)
@@ -598,11 +709,17 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID)
 
+	// Ensure patient ID is set
+	patientID := fmt.Sprintf("P%d", time.Now().Unix())
+	s.conversationManager.SetKey(session.ConversationID, "id", patientID)
+	s.conversationManager.SetKey(session.ConversationID, "patient_id", patientID)
+
+	// Get the next response based on conversation state
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
 		return twilio.GenerateTwiML(
-			twilio.SayAction("Sorry, I'm having trouble processing that. Let me try again.", "alice", "en-US"),
+			twilio.SayAction("Sorry, I'm having trouble at the moment. Please try again later.", "alice", "en-US"),
 			twilio.GatherAction("", map[string]string{
 				"input":         "speech",
 				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
@@ -614,17 +731,13 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 
 	logger.Info("Got AI response",
 		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
 		"response_length", len(aiResponse))
 
-	voiceOptions := &elevenlabs.VoiceOptions{
-		Stability:       0.5,
-		SimilarityBoost: 0.75,
-		Style:           0.0,
-		SpeakerBoost:    true,
-	}
-
-	audioResponse, err := s.elevenLabsClient.GenerateAudio(aiResponse, voiceOptions)
+	// Generate audio for the response
+	audioBytes, err := s.generateAndStoreResponseAudio(callSID, aiResponse)
 	if err != nil {
+		// If audio generation fails, fall back to Twilio's default voice
 		logger.Warn("Failed to generate audio, falling back to Twilio voice",
 			"call_sid", callSID,
 			"error", err)
@@ -640,46 +753,12 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 		), nil
 	}
 
-	logger.Info("Generated audio response",
-		"call_sid", callSID,
-		"audio_size", len(audioResponse.AudioBytes))
-
+	// If audio generation succeeded, play the audio file
 	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
 
-	req, err := http.NewRequest("POST", audioURL, bytes.NewBuffer(audioResponse.AudioBytes))
-	if err != nil {
-		logger.Error("Failed to create request to store audio", "error", err)
-		return twilio.GenerateTwiML(
-			twilio.SayAction(aiResponse, "alice", "en-US"),
-			twilio.GatherAction("", map[string]string{
-				"input":         "speech",
-				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
-				"language":      "en-US",
-				"speechTimeout": "auto",
-			}),
-		), nil
-	}
-
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		logger.Error("Failed to store audio", "error", err)
-		return twilio.GenerateTwiML(
-			twilio.SayAction(aiResponse, "alice", "en-US"),
-			twilio.GatherAction("", map[string]string{
-				"input":         "speech",
-				"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID),
-				"language":      "en-US",
-				"speechTimeout": "auto",
-			}),
-		), nil
-	}
-	defer resp.Body.Close()
-
-	logger.Info("Successfully stored audio and generating TwiML response",
-		"call_sid", callSID)
+	logger.Info("Successfully generated TwiML response with audio",
+		"call_sid", callSID,
+		"audio_size", len(audioBytes))
 
 	return twilio.GenerateTwiML(
 		twilio.PlayAction(audioURL),
@@ -692,9 +771,64 @@ func (s *Service) handleIncomingCall(c *gin.Context, event twilio.CallEvent) (st
 	), nil
 }
 
+// generateAndStoreResponseAudio generates audio for the AI response and stores it
+func (s *Service) generateAndStoreResponseAudio(callSID string, text string) ([]byte, error) {
+	voiceOptions := &elevenlabs.VoiceOptions{
+		Stability:       0.5,
+		SimilarityBoost: 0.75,
+		Style:           0.0,
+		SpeakerBoost:    true,
+	}
+
+	// Generate audio
+	audioResponse, err := s.elevenLabsClient.GenerateAudio(text, voiceOptions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate audio: %w", err)
+	}
+
+	// Store audio duration for timing calculations
+	s.mu.Lock()
+	if session, exists := s.activeStreamingSessions[callSID]; exists {
+		session.LastAudioDuration = audioResponse.Duration
+		s.activeStreamingSessions[callSID] = session
+	}
+	s.mu.Unlock()
+
+	// Store the audio data
+	audioURL := fmt.Sprintf("%s/api/call/audio/%s", s.baseURL, callSID)
+	req, err := http.NewRequest("POST", audioURL, bytes.NewBuffer(audioResponse.AudioBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request to store audio: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to store audio: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("audio storage API returned status code %d", resp.StatusCode)
+	}
+
+	logger.Info("Stored audio response",
+		"call_sid", callSID,
+		"audio_size", len(audioResponse.AudioBytes),
+		"duration", audioResponse.Duration)
+
+	return audioResponse.AudioBytes, nil
+}
+
 // handleCallCompleted processes a completed call
 func (s *Service) handleCallCompleted(c *gin.Context, event twilio.CallEvent) error {
 	callSID := event.CallSID
+
+	logger.Info("Call completed notification received",
+		"call_sid", callSID,
+		"status", event.Status)
 
 	s.mu.RLock()
 	session, exists := s.activeStreamingSessions[callSID]
@@ -705,13 +839,78 @@ func (s *Service) handleCallCompleted(c *gin.Context, event twilio.CallEvent) er
 		return nil
 	}
 
+	// Set session to inactive
+	s.mu.Lock()
+	session.IsActive = false
+	s.activeStreamingSessions[callSID] = session
+	s.mu.Unlock()
+
+	// Ensure we have all patient data before completing the conversation
+	s.processPatientDataForWorkflow(session.ConversationID)
+
+	// Mark the conversation as complete
 	if err := s.conversationManager.CompleteConversation(session.ConversationID); err != nil {
 		logger.Warn("Error completing conversation", "error", err)
+	} else {
+		logger.Info("Marked conversation as complete",
+			"conversation_id", session.ConversationID,
+			"call_sid", callSID)
 	}
 
+	// Process the call results in a separate goroutine with retries
 	go func() {
-		if _, err := s.ProcessCallResults(callSID); err != nil {
-			logger.Error("Failed to process call results", "error", err)
+		// Wait a moment to ensure all data is processed
+		time.Sleep(2 * time.Second)
+
+		// Check if session still exists
+		s.mu.RLock()
+		_, sessionExists := s.activeStreamingSessions[callSID]
+		s.mu.RUnlock()
+
+		if !sessionExists {
+			logger.Warn("Session no longer exists while processing completed call",
+				"call_sid", callSID)
+			return
+		}
+
+		var callResult *CallResult
+		var err error
+
+		// Try up to 3 times to process the results
+		for attempt := 0; attempt < 3; attempt++ {
+			callResult, err = s.ProcessCallResults(callSID)
+			if err == nil && callResult != nil {
+				logger.Info("Successfully processed call results",
+					"call_sid", callSID,
+					"patient_id", callResult.PatientData["id"],
+					"workflow_id", callResult.WorkflowID,
+					"has_instance_id", callResult.InstanceID != uuid.Nil)
+
+				// If we successfully processed the results, we can remove the session
+				if attempt == 2 {
+					// Only remove on the final attempt to avoid race conditions
+					s.mu.Lock()
+					delete(s.activeStreamingSessions, callSID)
+					s.mu.Unlock()
+					logger.Info("Removed completed call session", "call_sid", callSID)
+				}
+
+				break
+			}
+
+			logger.Warn("Retrying call result processing",
+				"call_sid", callSID,
+				"attempt", attempt+1,
+				"error", err)
+
+			// Increase wait time between retries
+			time.Sleep(time.Duration(2*(attempt+1)) * time.Second)
+		}
+
+		if err != nil || callResult == nil {
+			logger.Error("Failed to process call results after retries",
+				"error", err,
+				"call_sid", callSID)
 		}
 	}()
 
@@ -744,7 +943,7 @@ func (s *Service) handleCallFailed(c *gin.Context, event twilio.CallEvent) error
 	return nil
 }
 
-// HandleSpeechInput - simplified to always progress
+// HandleSpeechInput processes patient speech input and returns the next AI response
 func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, error) {
 	s.mu.RLock()
 	session, exists := s.activeStreamingSessions[callSID]
@@ -755,31 +954,445 @@ func (s *Service) HandleSpeechInput(callSID string, speechText string) (string, 
 		return "I'm sorry, I can't process your request right now.", nil
 	}
 
-	logger.Info("Handling speech input with deterministic progression",
+	logger.Info("Handling speech input",
 		"call_sid", callSID,
 		"conversation_id", session.ConversationID,
 		"input", speechText)
 
+	// Update session activity timestamp
 	s.mu.Lock()
 	session.LastActivity = time.Now()
 	s.activeStreamingSessions[callSID] = session
 	s.mu.Unlock()
 
-	// Get the next response in the deterministic sequence
+	// Extract medical data from patient input - more robust approach
+	s.extractAndStorePatientData(session.ConversationID, speechText)
+
+	// Store the patient's message with minimal processing wait time
+	// This simplified approach avoids the race conditions
+	err := s.conversationManager.AddMessage(session.ConversationID, "patient", speechText, 0.9)
+	if err != nil {
+		logger.Error("Failed to store patient message", "error", err)
+	}
+
+	// Force the conversation to advance to the next state
+	// The conversationManager.GetNextResponse method will now use message count
+	// instead of conversation state to determine the next question
 	aiResponse, err := s.conversationManager.GetNextResponse(session.ConversationID)
 	if err != nil {
 		logger.Error("Failed to get AI response", "error", err)
 		return "Let's continue with the next question.", nil
 	}
 
-	logger.Info("Generated deterministic AI response",
+	logger.Info("Generated AI response",
 		"call_sid", callSID,
+		"conversation_id", session.ConversationID,
 		"response_length", len(aiResponse))
 
-	// Check if conversation is complete
+	// Process conversation data after each interaction to ensure it's ready for workflow
+	s.processPatientDataForWorkflow(session.ConversationID)
+
+	// Check if conversation is complete and trigger workflow if needed
 	go s.CheckConversationCompletion(callSID)
 
 	return aiResponse, nil
+}
+
+// extractAndStorePatientData extracts medical information from patient input
+// and stores it directly in the conversation data, regardless of conversation state
+func (s *Service) extractAndStorePatientData(conversationID string, text string) {
+	textLower := strings.ToLower(text)
+
+	// Extract name if present (look for "my name is" or similar patterns)
+	if strings.Contains(textLower, "name is") || strings.Contains(textLower, "call me") {
+		words := strings.Fields(text)
+
+		// Find the position of "name" and "is"
+		nameIdx := -1
+		isIdx := -1
+
+		for i, word := range words {
+			if strings.Contains(strings.ToLower(word), "name") {
+				nameIdx = i
+			} else if nameIdx != -1 && strings.ToLower(word) == "is" {
+				isIdx = i
+				break
+			}
+		}
+
+		if nameIdx != -1 && isIdx != -1 && isIdx+1 < len(words) {
+			// Take up to 3 words after "is" for the name
+			endIdx := min(isIdx+4, len(words))
+			potentialName := strings.Join(words[isIdx+1:endIdx], " ")
+			potentialName = strings.Trim(potentialName, ".,!?;:")
+
+			// Store the name in both standard fields
+			s.conversationManager.SetKey(conversationID, "name", potentialName)
+			s.conversationManager.SetKey(conversationID, "patient_name", potentialName)
+
+			logger.Info("Extracted patient name",
+				"name", potentialName,
+				"conversation_id", conversationID)
+		}
+	}
+
+	// Extract age (any number between 1-120)
+	for _, word := range strings.Fields(textLower) {
+		word = strings.Trim(word, ".,!?;:")
+		if num, err := strconv.ParseFloat(word, 64); err == nil && num > 0 && num < 120 {
+			s.conversationManager.SetKey(conversationID, "age", num)
+			logger.Info("Extracted patient age",
+				"age", num,
+				"conversation_id", conversationID)
+			break
+		}
+	}
+
+	// Extract gender
+	if strings.Contains(textLower, "male") && !strings.Contains(textLower, "female") {
+		s.conversationManager.SetKey(conversationID, "gender", "male")
+		logger.Info("Extracted patient gender", "gender", "male")
+	} else if strings.Contains(textLower, "female") {
+		s.conversationManager.SetKey(conversationID, "gender", "female")
+		logger.Info("Extracted patient gender", "gender", "female")
+	} else if strings.Contains(textLower, "non-binary") || strings.Contains(textLower, "nonbinary") ||
+		strings.Contains(textLower, "other") {
+		s.conversationManager.SetKey(conversationID, "gender", "other")
+		logger.Info("Extracted patient gender", "gender", "other")
+	}
+
+	// Extract symptoms
+	symptomKeywords := []string{
+		"pain", "ache", "fever", "headache", "cough", "nausea", "vomiting",
+		"dizziness", "fatigue", "tired", "exhausted", "short of breath",
+		"difficulty breathing", "chest pain", "sore throat", "congestion",
+		"runny nose", "rash", "itching", "swelling", "dizzy",
+		"stomachache", "stomach pain", "back pain", "joint pain",
+		"migraine", "seizure", "bleeding", "numbness", "tingling",
+		"weakness", "chills", "sweating", "insomnia", "anxiety", "depression",
+	}
+
+	extractedSymptoms := []string{}
+	for _, symptom := range symptomKeywords {
+		if strings.Contains(textLower, symptom) {
+			extractedSymptoms = append(extractedSymptoms, symptom)
+		}
+	}
+
+	// Store extracted symptoms
+	if len(extractedSymptoms) > 0 {
+		// Get existing symptoms
+		var symptoms []interface{}
+		existingSymptoms, exists := s.conversationManager.GetKey(conversationID, "symptoms")
+		if exists {
+			if existingArray, ok := existingSymptoms.([]interface{}); ok {
+				symptoms = existingArray
+			} else {
+				symptoms = []interface{}{}
+			}
+		} else {
+			symptoms = []interface{}{}
+		}
+
+		// Add new symptoms and deduplicate
+		for _, symptom := range extractedSymptoms {
+			// Check if symptom already exists
+			exists := false
+			for _, existing := range symptoms {
+				if existingStr, ok := existing.(string); ok && strings.EqualFold(existingStr, symptom) {
+					exists = true
+					break
+				}
+			}
+
+			if !exists {
+				symptoms = append(symptoms, symptom)
+			}
+		}
+
+		s.conversationManager.SetKey(conversationID, "symptoms", symptoms)
+		logger.Info("Extracted patient symptoms",
+			"symptoms", extractedSymptoms,
+			"conversation_id", conversationID)
+	}
+
+	// Handle "no symptoms" response
+	if (strings.Contains(textLower, "no symptoms") ||
+		strings.Contains(textLower, "not experiencing") ||
+		strings.Contains(textLower, "don't have any")) &&
+		(strings.Contains(textLower, "symptom") || strings.Contains(textLower, "issue")) {
+		s.conversationManager.SetKey(conversationID, "symptoms", []interface{}{})
+		logger.Info("Patient reported no symptoms", "conversation_id", conversationID)
+	}
+
+	// Extract medical conditions
+	conditionKeywords := []string{
+		"diabetes", "asthma", "hypertension", "high blood pressure", "low blood pressure",
+		"depression", "anxiety", "arthritis", "heart disease", "copd", "coronary",
+		"cancer", "stroke", "thyroid", "high cholesterol", "gastritis", "ulcer",
+		"kidney disease", "liver disease", "epilepsy", "seizure disorder",
+		"multiple sclerosis", "parkinsons", "alzheimers", "crohns", "colitis",
+		"fibromyalgia", "lupus", "hiv", "aids", "hepatitis", "dementia",
+	}
+
+	extractedConditions := []string{}
+	for _, condition := range conditionKeywords {
+		if strings.Contains(textLower, condition) {
+			extractedConditions = append(extractedConditions, condition)
+		}
+	}
+
+	// Store extracted conditions
+	if len(extractedConditions) > 0 {
+		// Get existing conditions
+		var conditions []interface{}
+		existingConditions, exists := s.conversationManager.GetKey(conversationID, "conditions")
+		if exists {
+			if existingArray, ok := existingConditions.([]interface{}); ok {
+				conditions = existingArray
+			} else {
+				conditions = []interface{}{}
+			}
+		} else {
+			conditions = []interface{}{}
+		}
+
+		// Add new conditions and deduplicate
+		for _, condition := range extractedConditions {
+			// Check if condition already exists
+			exists := false
+			for _, existing := range conditions {
+				if existingStr, ok := existing.(string); ok && strings.EqualFold(existingStr, condition) {
+					exists = true
+					break
+				}
+			}
+
+			if !exists {
+				conditions = append(conditions, condition)
+			}
+		}
+
+		s.conversationManager.SetKey(conversationID, "conditions", conditions)
+		logger.Info("Extracted patient conditions",
+			"conditions", extractedConditions,
+			"conversation_id", conversationID)
+	}
+
+	// Handle "no conditions" response
+	if strings.Contains(textLower, "no conditions") ||
+		strings.Contains(textLower, "no medical conditions") ||
+		(strings.Contains(textLower, "don't have") && strings.Contains(textLower, "condition")) ||
+		(strings.Contains(textLower, "do not have") && strings.Contains(textLower, "condition")) {
+		s.conversationManager.SetKey(conversationID, "conditions", []interface{}{})
+		logger.Info("Patient reported no conditions", "conversation_id", conversationID)
+	}
+
+	// Extract medications
+	medicationKeywords := []string{
+		"aspirin", "tylenol", "ibuprofen", "advil", "motrin", "acetaminophen",
+		"metformin", "insulin", "lisinopril", "losartan", "atorvastatin",
+		"lipitor", "simvastatin", "zoloft", "prozac", "lexapro", "citalopram",
+		"xanax", "albuterol", "ventolin", "inhaler", "prednisone", "steroid",
+		"antibiotic", "levothyroxine", "synthroid", "metoprolol", "amlodipine",
+		"omeprazole", "nexium", "protonix", "furosemide", "lasix", "digoxin",
+		"warfarin", "coumadin", "gabapentin", "neurontin", "hydrocodone", "oxycodone",
+	}
+
+	extractedMedications := []string{}
+	for _, medication := range medicationKeywords {
+		if strings.Contains(textLower, medication) {
+			extractedMedications = append(extractedMedications, medication)
+		}
+	}
+
+	// Store extracted medications
+	if len(extractedMedications) > 0 {
+		// Get existing medications
+		var medications []interface{}
+		existingMedications, exists := s.conversationManager.GetKey(conversationID, "medications")
+		if exists {
+			if existingArray, ok := existingMedications.([]interface{}); ok {
+				medications = existingArray
+			} else {
+				medications = []interface{}{}
+			}
+		} else {
+			medications = []interface{}{}
+		}
+
+		// Add new medications and deduplicate
+		for _, medication := range extractedMedications {
+			// Check if medication already exists
+			exists := false
+			for _, existing := range medications {
+				if existingStr, ok := existing.(string); ok && strings.EqualFold(existingStr, medication) {
+					exists = true
+					break
+				}
+			}
+
+			if !exists {
+				medications = append(medications, medication)
+			}
+		}
+
+		s.conversationManager.SetKey(conversationID, "medications", medications)
+		logger.Info("Extracted patient medications",
+			"medications", extractedMedications,
+			"conversation_id", conversationID)
+	}
+
+	// Handle "no medications" response
+	if strings.Contains(textLower, "no medications") ||
+		strings.Contains(textLower, "not taking") ||
+		strings.Contains(textLower, "don't take any") ||
+		strings.Contains(textLower, "do not take any") {
+		s.conversationManager.SetKey(conversationID, "medications", []interface{}{})
+		logger.Info("Patient reported no medications", "conversation_id", conversationID)
+	}
+
+	// Extract allergies
+	allergyKeywords := []string{
+		"penicillin", "peanuts", "tree nuts", "shellfish", "fish",
+		"milk", "dairy", "eggs", "wheat", "gluten", "soy", "latex",
+		"bee stings", "pollen", "dust", "mold", "cats", "dogs",
+		"sulfa", "amoxicillin", "aspirin", "ibuprofen", "nsaids",
+		"anaphylaxis", "hives", "rash", "swelling",
+	}
+
+	extractedAllergies := []string{}
+	for _, allergy := range allergyKeywords {
+		if strings.Contains(textLower, allergy) &&
+			(strings.Contains(textLower, "allerg") || strings.Contains(textLower, "reaction")) {
+			extractedAllergies = append(extractedAllergies, allergy)
+		}
+	}
+
+	// Store extracted allergies
+	if len(extractedAllergies) > 0 {
+		// Get existing allergies
+		var allergies []interface{}
+		existingAllergies, exists := s.conversationManager.GetKey(conversationID, "allergies")
+		if exists {
+			if existingArray, ok := existingAllergies.([]interface{}); ok {
+				allergies = existingArray
+			} else {
+				allergies = []interface{}{}
+			}
+		} else {
+			allergies = []interface{}{}
+		}
+
+		// Add new allergies and deduplicate
+		for _, allergy := range extractedAllergies {
+			// Check if allergy already exists
+			exists := false
+			for _, existing := range allergies {
+				if existingStr, ok := existing.(string); ok && strings.EqualFold(existingStr, allergy) {
+					exists = true
+					break
+				}
+			}
+
+			if !exists {
+				allergies = append(allergies, allergy)
+			}
+		}
+
+		s.conversationManager.SetKey(conversationID, "allergies", allergies)
+		logger.Info("Extracted patient allergies",
+			"allergies", extractedAllergies,
+			"conversation_id", conversationID)
+	}
+
+	// Handle "no allergies" response
+	if strings.Contains(textLower, "no allergies") ||
+		strings.Contains(textLower, "not allergic") ||
+		strings.Contains(textLower, "don't have any allergies") ||
+		strings.Contains(textLower, "do not have any allergies") {
+		s.conversationManager.SetKey(conversationID, "allergies", []interface{}{})
+		logger.Info("Patient reported no allergies", "conversation_id", conversationID)
+	}
+}
+
+// processPatientDataForWorkflow ensures necessary data is present and
+// structured correctly for workflow triggering
+func (s *Service) processPatientDataForWorkflow(conversationID string) {
+	conversation, exists := s.conversationManager.GetConversation(conversationID)
+	if !exists {
+		logger.Error("Failed to get conversation for data processing",
+			"conversation_id", conversationID)
+		return
+	}
+
+	// Ensure all required array fields exist as arrays (even if empty)
+	ensureArrayField(s.conversationManager, conversationID, "symptoms")
+	ensureArrayField(s.conversationManager, conversationID, "conditions")
+	ensureArrayField(s.conversationManager, conversationID, "medications")
+	ensureArrayField(s.conversationManager, conversationID, "allergies")
+
+	// Process collected data to ensure a proper structure
+	// If patient ID is missing, create one
+	patientID, exists := s.conversationManager.GetKey(conversationID, "id")
+	if !exists || patientID == nil || patientID == "" {
+		newID := fmt.Sprintf("P%d", time.Now().Unix())
+		s.conversationManager.SetKey(conversationID, "id", newID)
+		logger.Info("Created patient ID", "id", newID, "conversation_id", conversationID)
+	}
+
+	// Double check patient name is set (critical field)
+	if conversation.PatientName == "" {
+		name, exists := s.conversationManager.GetKey(conversationID, "name")
+		if exists && name != nil && name != "" {
+			if nameStr, ok := name.(string); ok {
+				conversation.PatientName = nameStr
+			}
+		} else {
+			name, exists := s.conversationManager.GetKey(conversationID, "patient_name")
+			if exists && name != nil && name != "" {
+				if nameStr, ok := name.(string); ok {
+					conversation.PatientName = nameStr
+					s.conversationManager.SetKey(conversationID, "name", nameStr)
+				}
+			}
+		}
+	}
+
+	// Ensure patient name is stored in both conversation and data
+	if conversation.PatientName != "" {
+		s.conversationManager.SetKey(conversationID, "name", conversation.PatientName)
+		s.conversationManager.SetKey(conversationID, "patient_name", conversation.PatientName)
+	}
+
+	logger.Info("Processed patient data for workflow",
+		"conversation_id", conversationID,
+		"patient_name", conversation.PatientName,
+		"status", string(conversation.Status))
+}
+
+// ensureArrayField makes sure a field exists as an array
+func ensureArrayField(manager *conversation.ConversationManager, conversationID, field string) {
+	value, exists := manager.GetKey(conversationID, field)
+	if !exists || value == nil {
+		// Field doesn't exist, create empty array
+		manager.SetKey(conversationID, field, []interface{}{})
+	} else {
+		// Check if it's already an array
+		_, isArray := value.([]interface{})
+		if !isArray {
+			// Not an array, convert to empty array
+			manager.SetKey(conversationID, field, []interface{}{})
+		}
+	}
+}
+
+// Helper function min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // CleanupInactiveSessions removes sessions that have been inactive for too long
@@ -991,6 +1604,7 @@ func (s *Service) StoreMessageAndWaitForProcessing(callSID string, speaker strin
 }
 
 // CheckConversationCompletion checks if the conversation is complete and ends the call if necessary
+// It also triggers workflow processing when the conversation is complete
 func (s *Service) CheckConversationCompletion(callSID string) {
 	s.mu.RLock()
 	session, exists := s.activeStreamingSessions[callSID]
@@ -1019,37 +1633,142 @@ func (s *Service) CheckConversationCompletion(callSID string) {
 		return
 	}
 
-	// If conversation is in StatusComplete or StatusClosing state, plan to end the call
-	if conversation.Status == "complete" || conversation.Status == "closing" {
-		logger.Info("Conversation completed, ending call automatically",
+	// Count messages to determine if we've reached the end of the conversation
+	patientMsgCount := 0
+	aiMsgCount := 0
+	for _, msg := range conversation.Transcript {
+		if msg.Speaker == "patient" {
+			patientMsgCount++
+		} else if msg.Speaker == "ai" {
+			aiMsgCount++
+		}
+	}
+
+	// If we have enough back-and-forth or the conversation state is complete/closing, process the call
+	if patientMsgCount >= 7 || conversation.Status == "complete" || conversation.Status == "closing" {
+		logger.Info("Conversation appears complete based on message count or status",
 			"call_sid", callSID,
 			"conversation_id", session.ConversationID,
-			"status", conversation.Status)
+			"status", conversation.Status,
+			"patient_msg_count", patientMsgCount,
+			"ai_msg_count", aiMsgCount)
 
-		// Fixed delay - still simple but more reliable
-		delaySeconds := 15
+		// If not already in complete state, mark it as such
+		if conversation.Status != "complete" && conversation.Status != "closing" {
+			err := s.conversationManager.CompleteConversation(session.ConversationID)
+			if err != nil {
+				logger.Error("Failed to mark conversation as complete",
+					"error", err,
+					"conversation_id", session.ConversationID)
+			} else {
+				logger.Info("Marked conversation as complete",
+					"conversation_id", session.ConversationID)
+			}
+		}
 
-		logger.Info("Delaying call end to allow message playback",
+		// Process the call results in a separate goroutine to avoid blocking
+		go func() {
+			// Wait a moment to ensure all data is synchronized
+			time.Sleep(500 * time.Millisecond)
+
+			// Check if we've already processed the results
+			s.mu.RLock()
+			_, stillExists := s.activeStreamingSessions[callSID]
+			s.mu.RUnlock()
+
+			if !stillExists {
+				logger.Warn("Session no longer exists while processing results", "call_sid", callSID)
+				return
+			}
+
+			// Process results with retries
+			var callResult *CallResult
+			var resultErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				callResult, resultErr = s.ProcessCallResults(callSID)
+				if resultErr == nil && callResult != nil {
+					logger.Info("Successfully processed call results",
+						"call_sid", callSID,
+						"patient_id", callResult.PatientData["id"],
+						"workflow_id", callResult.WorkflowID,
+						"attempt", attempt+1)
+					break
+				}
+
+				logger.Warn("Retrying call result processing",
+					"call_sid", callSID,
+					"attempt", attempt+1,
+					"error", resultErr)
+				time.Sleep(1 * time.Second)
+			}
+
+			if resultErr != nil || callResult == nil {
+				logger.Error("Failed to process call results after retries",
+					"error", resultErr,
+					"call_sid", callSID)
+			}
+		}()
+
+		// If conversation is officially in "complete" or "closing" state, plan to end the call
+		if conversation.Status == "complete" || conversation.Status == "closing" {
+			// Calculate appropriate delay based on the last message
+			delaySeconds := 15
+
+			// Try to check the length of the last AI message to adjust delay
+			if aiMsgCount > 0 {
+				lastAIMsg := ""
+				for i := len(conversation.Transcript) - 1; i >= 0; i-- {
+					if conversation.Transcript[i].Speaker == "ai" {
+						lastAIMsg = conversation.Transcript[i].Text
+						break
+					}
+				}
+
+				// Adjust delay based on message length (longer messages need more time)
+				msgWords := len(strings.Fields(lastAIMsg))
+				if msgWords > 0 {
+					// Approximately 3 words per second + 5 second buffer
+					delaySeconds = (msgWords / 3) + 5
+					// Cap at reasonable limits
+					if delaySeconds < 10 {
+						delaySeconds = 10
+					} else if delaySeconds > 30 {
+						delaySeconds = 30
+					}
+				}
+			}
+
+			logger.Info("Conversation completed, ending call automatically",
+				"call_sid", callSID,
+				"conversation_id", session.ConversationID,
+				"status", conversation.Status,
+				"delay_seconds", delaySeconds)
+
+			// Wait for the goodbye message to be delivered
+			time.Sleep(time.Duration(delaySeconds) * time.Second)
+
+			// Double check that we're still in complete state
+			conversation, stillExists := s.conversationManager.GetConversation(session.ConversationID)
+			if !stillExists || (conversation.Status != "complete" && conversation.Status != "closing") {
+				logger.Info("Conversation state changed during delay, not ending call",
+					"call_sid", callSID)
+				return
+			}
+
+			// End the call
+			if err := s.EndCall(callSID); err != nil {
+				logger.Error("Failed to automatically end call", "error", err, "call_sid", callSID)
+			} else {
+				logger.Info("Call ended automatically", "call_sid", callSID)
+			}
+		}
+	} else {
+		logger.Info("Conversation not yet complete, continuing",
 			"call_sid", callSID,
-			"delay_seconds", delaySeconds)
-
-		// Wait for the goodbye message to be delivered
-		time.Sleep(time.Duration(delaySeconds) * time.Second)
-
-		// Double check that we're still in complete state
-		conversation, stillExists := s.conversationManager.GetConversation(session.ConversationID)
-		if !stillExists || (conversation.Status != "complete" && conversation.Status != "closing") {
-			logger.Info("Conversation state changed during delay, not ending call",
-				"call_sid", callSID)
-			return
-		}
-
-		// End the call
-		if err := s.EndCall(callSID); err != nil {
-			logger.Error("Failed to automatically end call", "error", err, "call_sid", callSID)
-		} else {
-			logger.Info("Call ended automatically", "call_sid", callSID)
-		}
+			"conversation_id", session.ConversationID,
+			"status", conversation.Status,
+			"patient_msg_count", patientMsgCount,
+			"ai_msg_count", aiMsgCount)
 	}
 }
 

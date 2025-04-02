@@ -482,20 +482,82 @@ If certain information is missing, include empty values rather than omitting fie
 	// Always check for specific health data regardless of conversation state
 	scanForHealthData(extractedData, conversation.CollectedData)
 
-	// Only advance the state if we extracted the expected information
-	// or there's a clear indication that we should advance
-	if extractedExpectedInfo ||
-		strings.Contains(strings.ToLower(inputText), "next") ||
-		strings.Contains(strings.ToLower(inputText), "continue") ||
-		strings.Contains(strings.ToLower(inputText), "go ahead") {
-		advanceConversationState(conversation)
+	// Use more aggressive data extraction for common fields
+	if !extractedExpectedInfo {
+		// Try to extract name if we're in the name state
+		if currentStatus == StatusName || currentStatus == StatusGreeting {
+			nameFinder := `Extract ONLY the patient's name from this text.
+			Output JUST the name as a string with no additional text.
+			Text: "%s"`
+			
+			namePrompt := fmt.Sprintf(nameFinder, inputText)
+			response, err := m.aiClient.GenerateCompletion(context.Background(), namePrompt, ai.CompletionOptions{
+				MaxTokens:   128,
+				Temperature: 0.1,
+				ModelName:   "gpt-3.5-turbo",
+			})
+			
+			if err == nil && response.Text != "" {
+				potentialName := strings.TrimSpace(response.Text)
+				if len(potentialName) > 0 && len(potentialName) < 50 {
+					conversation.PatientName = potentialName
+					conversation.CollectedData["patient_name"] = potentialName
+					conversation.CollectedData["name"] = potentialName
+					logger.Info("Extracted patient name with secondary method", "name", potentialName)
+					extractedExpectedInfo = true
+				}
+			}
+		}
+		
+		// Try to extract age if we're in the age state
+		if currentStatus == StatusAge && !extractedExpectedInfo {
+			textLower := strings.ToLower(inputText)
+			// Look for patterns like "I am 42" or "42 years old"
+			for _, word := range strings.Fields(textLower) {
+				if num, err := strconv.ParseFloat(word, 64); err == nil && num > 0 && num < 120 {
+					conversation.CollectedData["age"] = num
+					logger.Info("Extracted patient age from direct text parsing", "age", num)
+					extractedExpectedInfo = true
+					break
+				}
+			}
+		}
+		
+		// Try to extract gender if we're in the gender state
+		if currentStatus == StatusGender && !extractedExpectedInfo {
+			textLower := strings.ToLower(inputText)
+			if strings.Contains(textLower, "male") || strings.Contains(textLower, "man") || strings.Contains(textLower, "boy") {
+				conversation.CollectedData["gender"] = "male"
+				logger.Info("Extracted patient gender as male from text")
+				extractedExpectedInfo = true
+			} else if strings.Contains(textLower, "female") || strings.Contains(textLower, "woman") || strings.Contains(textLower, "girl") {
+				conversation.CollectedData["gender"] = "female"
+				logger.Info("Extracted patient gender as female from text")
+				extractedExpectedInfo = true
+			} else if strings.Contains(textLower, "non-binary") || strings.Contains(textLower, "nonbinary") || 
+					  strings.Contains(textLower, "other") || strings.Contains(textLower, "they") {
+				conversation.CollectedData["gender"] = "other"
+				logger.Info("Extracted patient gender as other from text")
+				extractedExpectedInfo = true
+			}
+		}
+	}
+
+	// Always advance the state for a more fluid conversation, but track if we succeeded
+	// in extracting the expected information
+	advanceConversationState(conversation)
+
+	// Log appropriate message based on extraction success
+	if extractedExpectedInfo {
 		logger.Info("Advanced conversation state after successful extraction",
 			"conversation_id", conversationID,
-			"new_state", string(conversation.Status))
+			"new_state", string(conversation.Status),
+			"extracted_info", true)
 	} else {
-		logger.Info("Did not advance conversation state - no relevant info extracted",
+		logger.Info("Advanced conversation state despite no extraction",
 			"conversation_id", conversationID,
-			"current_state", string(conversation.Status))
+			"new_state", string(conversation.Status),
+			"extracted_info", false)
 	}
 
 	return nil
@@ -521,7 +583,7 @@ func (m *ConversationManager) RepeatLastQuestion(conversationID string) (string,
 	return "I didn't understand that. Could you please clarify?", nil
 }
 
-// GetNextResponse method with forced sequential progression
+// GetNextResponse generates the next AI response based on the conversation state
 func (m *ConversationManager) GetNextResponse(conversationID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -531,65 +593,82 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		return "", fmt.Errorf("conversation %s not found", conversationID)
 	}
 
-	// Deterministic progression based on message count only
-	// Count how many questions we've asked and answer we've received
-	patientMessageCount := 0
-	aiMessageCount := 0
+	// Count existing messages to determine where we are in the conversation
+	patientMsgCount := 0
 	for _, msg := range conversation.Transcript {
 		if msg.Speaker == "patient" {
-			patientMessageCount++
-		} else if msg.Speaker == "ai" {
-			aiMessageCount++
+			patientMsgCount++
 		}
 	}
 
-	// Process based solely on how many questions we've asked
+	// Check the current state and collected data
+	currentState := conversation.Status
+	patientData := conversation.CollectedData
 	var nextQuestion string
 	var nextState ConversationStatus
 
-	// If this is the first response (no patient messages yet)
-	if patientMessageCount == 0 {
+	logger.Info("Generating next response",
+		"conversation_id", conversationID,
+		"current_state", string(currentState),
+		"patient_messages", patientMsgCount,
+		"collected_data_keys", getMapKeys(patientData))
+
+	// Simple fixed sequence of questions that ignores state and just uses message count
+	switch patientMsgCount {
+	case 0:
+		// First message - greeting
 		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
 		nextState = StatusName
-	} else if patientMessageCount == 1 {
+		
+	case 1:
 		// After first patient response, ask for age
 		if conversation.PatientName != "" {
 			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", conversation.PatientName)
+		} else if name, ok := patientData["name"].(string); ok && name != "" {
+			conversation.PatientName = name
+			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", name)
 		} else {
 			nextQuestion = "Thank you. What is your age?"
 		}
 		nextState = StatusAge
-	} else if patientMessageCount == 2 {
+		
+	case 2:
 		// After second patient response, ask for gender
-		nextQuestion = "What is your gender?"
+		nextQuestion = "What is your gender? Male, female, or other?"
 		nextState = StatusGender
-	} else if patientMessageCount == 3 {
+		
+	case 3:
 		// After third patient response, ask for symptoms
-		nextQuestion = "What symptoms are you experiencing?"
+		nextQuestion = "What symptoms are you experiencing? Please tell me any health issues you're having."
 		nextState = StatusSymptoms
-	} else if patientMessageCount == 4 {
+		
+	case 4:
 		// After fourth patient response, ask for conditions
-		nextQuestion = "Do you have any existing medical conditions?"
+		nextQuestion = "Do you have any existing medical conditions like diabetes, hypertension, or asthma?"
 		nextState = StatusConditions
-	} else if patientMessageCount == 5 {
+		
+	case 5:
 		// After fifth patient response, ask for medications
-		nextQuestion = "What medications are you currently taking?"
+		nextQuestion = "What medications are you currently taking? If none, please say 'none'."
 		nextState = StatusMedication
-	} else if patientMessageCount == 6 {
+		
+	case 6:
 		// After sixth patient response, ask for allergies
-		nextQuestion = "Do you have any allergies?"
+		nextQuestion = "Do you have any allergies to medications or other substances like penicillin or latex?"
 		nextState = StatusAllergies
-	} else if patientMessageCount == 7 {
-		// After seventh patient response, thank the patient and begin closing
+		
+	case 7:
+		// Final message - closing
 		nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
 		nextState = StatusClosing
-	} else {
-		// Any further responses, just say goodbye
+		
+	default:
+		// Any further responses after the 7th, just say goodbye
 		nextQuestion = "Thank you for your time. Your information has been recorded. Goodbye."
 		nextState = StatusComplete
 	}
 
-	// Store this response in the conversation transcript
+	// Update the conversation status
 	conversation.Status = nextState
 
 	// Add the message to the conversation
@@ -603,10 +682,11 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 
 	conversation.Transcript = append(conversation.Transcript, exchange)
 
-	logger.Info("Added message to conversation with strict progression",
+	logger.Info("Added next question based on message count",
 		"conversation_id", conversationID,
-		"message_count", patientMessageCount,
+		"patient_msg_count", patientMsgCount,
 		"next_state", string(nextState),
+		"patient_name", conversation.PatientName,
 		"response_length", len(nextQuestion))
 
 	return nextQuestion, nil
@@ -881,6 +961,12 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		return nil, fmt.Errorf("conversation %s not found", conversationID)
 	}
 
+	// Log current collected data for debugging
+	logger.Info("Processing conversation data",
+		"conversation_id", conversationID,
+		"collected_data_keys", getMapKeys(conversation.CollectedData),
+		"patient_name", conversation.PatientName)
+
 	// Create a patient data structure that matches our target format exactly
 	patientData := map[string]any{
 		"id":          fmt.Sprintf("P%d", time.Now().Unix()),
@@ -899,27 +985,92 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		},
 	}
 
+	// Set patient name - check multiple possible fields
+	if conversation.PatientName != "" {
+		patientData["name"] = conversation.PatientName
+	} else if name, ok := conversation.CollectedData["name"].(string); ok && name != "" {
+		patientData["name"] = name
+		// Update the conversation's PatientName for consistency
+		conversation.PatientName = name
+	} else if name, ok := conversation.CollectedData["patient_name"].(string); ok && name != "" {
+		patientData["name"] = name
+		// Update the conversation's PatientName for consistency
+		conversation.PatientName = name
+	}
+
+	// Try to extract data from conversation transcript if we don't have it
+	if patientData["name"] == "" || patientData["age"] == 0.0 || patientData["gender"] == "" {
+		for _, msg := range conversation.Transcript {
+			if msg.Speaker == "patient" {
+				// Try to extract missing data from patient messages
+				text := strings.ToLower(msg.Text)
+				
+				// Extract name if missing
+				if patientData["name"] == "" && (strings.Contains(text, "name is") || strings.Contains(text, "call me") || strings.Contains(text, "i am ")) {
+					// This is a crude extraction just for fallback
+					words := strings.Fields(msg.Text)
+					if len(words) >= 3 {
+						for i := 0; i < len(words)-2; i++ {
+							if strings.Contains(strings.ToLower(words[i]), "name") && 
+							   strings.ToLower(words[i+1]) == "is" {
+								potentialName := strings.Join(words[i+2:i+4], " ")
+								// Clean up any punctuation
+								potentialName = strings.Trim(potentialName, ",.!?;:")
+								if potentialName != "" {
+									patientData["name"] = potentialName
+									conversation.PatientName = potentialName
+									conversation.CollectedData["name"] = potentialName
+									conversation.CollectedData["patient_name"] = potentialName
+									break
+								}
+							}
+						}
+					}
+				}
+				
+				// Extract age if missing
+				if patientData["age"].(float64) == 0.0 {
+					for _, word := range strings.Fields(text) {
+						if num, err := strconv.ParseFloat(word, 64); err == nil && num > 0 && num < 120 {
+							patientData["age"] = num
+							conversation.CollectedData["age"] = num
+							break
+						}
+					}
+				}
+				
+				// Extract gender if missing
+				if patientData["gender"] == "" {
+					if strings.Contains(text, "male") && !strings.Contains(text, "female") {
+						patientData["gender"] = "male"
+						conversation.CollectedData["gender"] = "male"
+					} else if strings.Contains(text, "female") {
+						patientData["gender"] = "female"
+						conversation.CollectedData["gender"] = "female"
+					}
+				}
+			}
+		}
+	}
+
 	// Set default age/gender if not available
 	if ageValue, ok := conversation.CollectedData["age"]; ok {
 		if age, ok := ageValue.(float64); ok {
 			patientData["age"] = age
 		} else if age, ok := ageValue.(int); ok {
 			patientData["age"] = float64(age)
-		} else {
-			patientData["age"] = 0.0
+		} else if ageStr, ok := ageValue.(string); ok && ageStr != "" {
+			// Try to convert string to number
+			if age, err := strconv.ParseFloat(ageStr, 64); err == nil {
+				patientData["age"] = age
+			}
 		}
-	} else {
-		patientData["age"] = 0.0
 	}
 
 	if genderValue, ok := conversation.CollectedData["gender"]; ok {
 		if gender, ok := genderValue.(string); ok {
 			patientData["gender"] = gender
-		} else {
-			patientData["gender"] = ""
 		}
-	} else {
-		patientData["gender"] = ""
 	}
 
 	// Process symptoms - convert from interface slice to string slice
@@ -928,6 +1079,9 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		for _, s := range symptoms {
 			if symptom, ok := s.(string); ok {
 				symptomStrings = append(symptomStrings, symptom)
+			} else {
+				// Try converting to string
+				symptomStrings = append(symptomStrings, fmt.Sprintf("%v", s))
 			}
 		}
 		patientData["symptoms"] = symptomStrings
@@ -939,6 +1093,9 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		for _, c := range conditions {
 			if condition, ok := c.(string); ok {
 				conditionStrings = append(conditionStrings, condition)
+			} else {
+				// Try converting to string
+				conditionStrings = append(conditionStrings, fmt.Sprintf("%v", c))
 			}
 		}
 		patientData["conditions"] = conditionStrings
@@ -950,6 +1107,9 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		for _, m := range medications {
 			if medication, ok := m.(string); ok {
 				medicationStrings = append(medicationStrings, medication)
+			} else {
+				// Try converting to string
+				medicationStrings = append(medicationStrings, fmt.Sprintf("%v", m))
 			}
 		}
 		patientData["medications"] = medicationStrings
@@ -961,25 +1121,32 @@ func (m *ConversationManager) ProcessConversationData(conversationID string) (ma
 		for _, a := range allergies {
 			if allergy, ok := a.(string); ok {
 				allergyStrings = append(allergyStrings, allergy)
+			} else {
+				// Try converting to string
+				allergyStrings = append(allergyStrings, fmt.Sprintf("%v", a))
 			}
 		}
 		patientData["allergies"] = allergyStrings
 	}
 
-	// Save original conversation data if needed but don't expose in main structure
-	if convID, ok := conversation.CollectedData["conversation_id"].(string); ok {
-		patientData["_conversation_id"] = convID
-	}
+	// Save original conversation ID for reference
+	patientData["_conversation_id"] = conversationID
 
 	logger.Info("Standardized patient data",
 		"original_keys", getMapKeys(conversation.CollectedData),
-		"standardized_keys", getMapKeys(patientData))
+		"standardized_keys", getMapKeys(patientData),
+		"name", patientData["name"],
+		"age", patientData["age"],
+		"gender", patientData["gender"],
+		"symptom_count", len(patientData["symptoms"].([]string)),
+		"condition_count", len(patientData["conditions"].([]string)))
 
 	return map[string]any{
 		"patient_data": patientData,
 		"conversation_data": map[string]any{
 			"start_time": conversation.StartTime.Format(time.RFC3339),
 			"status":     string(conversation.Status),
+			"id":         conversationID,
 		},
 	}, nil
 }
