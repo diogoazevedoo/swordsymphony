@@ -192,6 +192,7 @@ func (c *Container) initConversationServices() error {
 		c.ConversationManager,
 		c.WorkflowService,
 		c.ResultRepo,
+		c.AIClient,
 		c.Config.Twilio.WebhookBaseURL,
 	)
 

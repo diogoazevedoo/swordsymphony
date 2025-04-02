@@ -164,37 +164,55 @@ func (m *ConversationManager) AddMessage(conversationID string, speaker string, 
 	}
 
 	// Check if this exact message already exists in recent history (prevents duplicates)
+	isDuplicate := false
 	for i := len(conversation.Transcript) - 1; i >= 0 && i >= len(conversation.Transcript)-3; i-- {
 		if conversation.Transcript[i].Speaker == speaker &&
 			conversation.Transcript[i].Text == text {
-			// Message already exists, don't add it again
-			logger.Info("Skipping duplicate message",
+			// Message already exists, but we'll still process it to advance state
+			logger.Info("Found duplicate message, but will process anyway",
 				"conversation_id", conversationID,
 				"speaker", speaker)
-			m.mu.Unlock()
-			return nil
+			isDuplicate = true
+			break
 		}
 	}
 
-	exchange := MessageExchange{
-		Speaker:     speaker,
-		Text:        text,
-		Timestamp:   time.Now(),
-		Confidence:  confidence,
-		IsProcessed: speaker != "patient",
+	// Only add to transcript if not a duplicate (to avoid bloat)
+	if !isDuplicate {
+		exchange := MessageExchange{
+			Speaker:     speaker,
+			Text:        text,
+			Timestamp:   time.Now(),
+			Confidence:  confidence,
+			IsProcessed: speaker != "patient",
+		}
+
+		conversation.Transcript = append(conversation.Transcript, exchange)
+
+		logger.Info("Added message to conversation",
+			"conversation_id", conversationID,
+			"speaker", speaker,
+			"text_length", len(text),
+			"confidence", confidence)
 	}
 
-	conversation.Transcript = append(conversation.Transcript, exchange)
-
-	logger.Info("Added message to conversation",
-		"conversation_id", conversationID,
-		"speaker", speaker,
-		"text_length", len(text),
-		"confidence", confidence)
-
-	// Process patient messages synchronously while still holding the lock
-	if speaker == "patient" && !exchange.IsProcessed {
+	// Process patient messages whether duplicate or not
+	// This ensures state progression even with duplicate messages
+	if speaker == "patient" {
+		// If duplicate, we don't want to add to transcript but still want to process
 		messageIndex := len(conversation.Transcript) - 1
+		if isDuplicate && messageIndex >= 0 {
+			// Mark the message as needing processing
+			conversation.Transcript[messageIndex].IsProcessed = false
+		}
+		
+		// If we didn't add a new message but there are no patient messages
+		// (unlikely edge case), don't try to process
+		if isDuplicate && messageIndex < 0 {
+			m.mu.Unlock()
+			return nil
+		}
+		
 		m.mu.Unlock() // Temporarily unlock to allow other operations
 
 		// Analyze the message
@@ -593,7 +611,13 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		return "", fmt.Errorf("conversation %s not found", conversationID)
 	}
 
-	// Count existing messages to determine where we are in the conversation
+	// Use the conversation state instead of counting messages to determine the next question
+	currentState := conversation.Status
+	patientData := conversation.CollectedData
+	var nextQuestion string
+	var nextState ConversationStatus
+
+	// Count messages for logging
 	patientMsgCount := 0
 	for _, msg := range conversation.Transcript {
 		if msg.Speaker == "patient" {
@@ -601,27 +625,19 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		}
 	}
 
-	// Check the current state and collected data
-	currentState := conversation.Status
-	patientData := conversation.CollectedData
-	var nextQuestion string
-	var nextState ConversationStatus
-
 	logger.Info("Generating next response",
 		"conversation_id", conversationID,
 		"current_state", string(currentState),
 		"patient_messages", patientMsgCount,
 		"collected_data_keys", getMapKeys(patientData))
 
-	// Simple fixed sequence of questions that ignores state and just uses message count
-	switch patientMsgCount {
-	case 0:
-		// First message - greeting
+	// Determine the next question based on the current state
+	switch currentState {
+	case StatusGreeting, StatusName:
 		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. What is your name?"
 		nextState = StatusName
 		
-	case 1:
-		// After first patient response, ask for age
+	case StatusAge:
 		if conversation.PatientName != "" {
 			nextQuestion = fmt.Sprintf("Thank you, %s. What is your age?", conversation.PatientName)
 		} else if name, ok := patientData["name"].(string); ok && name != "" {
@@ -632,44 +648,54 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		}
 		nextState = StatusAge
 		
-	case 2:
-		// After second patient response, ask for gender
+	case StatusGender:
 		nextQuestion = "What is your gender? Male, female, or other?"
 		nextState = StatusGender
 		
-	case 3:
-		// After third patient response, ask for symptoms
+	case StatusSymptoms:
 		nextQuestion = "What symptoms are you experiencing? Please tell me any health issues you're having."
 		nextState = StatusSymptoms
 		
-	case 4:
-		// After fourth patient response, ask for conditions
+	case StatusConditions:
 		nextQuestion = "Do you have any existing medical conditions like diabetes, hypertension, or asthma?"
 		nextState = StatusConditions
 		
-	case 5:
-		// After fifth patient response, ask for medications
+	case StatusMedication:
 		nextQuestion = "What medications are you currently taking? If none, please say 'none'."
 		nextState = StatusMedication
 		
-	case 6:
-		// After sixth patient response, ask for allergies
+	case StatusAllergies:
 		nextQuestion = "Do you have any allergies to medications or other substances like penicillin or latex?"
 		nextState = StatusAllergies
 		
-	case 7:
-		// Final message - closing
+	case StatusClosing:
 		nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
-		nextState = StatusClosing
+		nextState = StatusComplete
 		
-	default:
-		// Any further responses after the 7th, just say goodbye
+	case StatusComplete:
 		nextQuestion = "Thank you for your time. Your information has been recorded. Goodbye."
 		nextState = StatusComplete
+		
+	default:
+		// If we somehow get an unknown state, reset to greeting
+		nextQuestion = "Hello, I'm the medical assistant from Sword Symphony. How can I help you today?"
+		nextState = StatusGreeting
 	}
 
-	// Update the conversation status
-	conversation.Status = nextState
+	// If we have a completed patient data set, move directly to closing
+	if hasCompletedBasicInfo(patientData) && currentState != StatusClosing && currentState != StatusComplete {
+		nextQuestion = "Thank you for providing all the information. We have everything we need. Have a good day. Goodbye."
+		nextState = StatusClosing
+	}
+
+	// Update the conversation status - always progress to the next state
+	if currentState == nextState && nextState != StatusComplete {
+		// Force state advancement if we're still on the same state (except for Complete)
+		advanceConversationState(conversation)
+		nextState = conversation.Status
+	} else {
+		conversation.Status = nextState
+	}
 
 	// Add the message to the conversation
 	exchange := MessageExchange{
@@ -690,6 +716,36 @@ func (m *ConversationManager) GetNextResponse(conversationID string) (string, er
 		"response_length", len(nextQuestion))
 
 	return nextQuestion, nil
+}
+
+// hasCompletedBasicInfo checks if we have collected enough basic patient information
+func hasCompletedBasicInfo(data map[string]interface{}) bool {
+	// Check if we have name, age, gender, and at least one symptom
+	hasName := false
+	if name, ok := data["name"].(string); ok && name != "" {
+		hasName = true
+	} else if name, ok := data["patient_name"].(string); ok && name != "" {
+		hasName = true
+	}
+	
+	hasAge := false
+	if age, ok := data["age"].(float64); ok && age > 0 {
+		hasAge = true
+	} else if age, ok := data["age"].(int); ok && age > 0 {
+		hasAge = true
+	}
+	
+	hasGender := false
+	if gender, ok := data["gender"].(string); ok && gender != "" {
+		hasGender = true
+	}
+	
+	hasSymptoms := false
+	if symptoms, ok := data["symptoms"].([]interface{}); ok && len(symptoms) > 0 {
+		hasSymptoms = true
+	}
+	
+	return hasName && hasAge && hasGender && hasSymptoms
 }
 
 // advanceConversationState moves the conversation to the next logical state
