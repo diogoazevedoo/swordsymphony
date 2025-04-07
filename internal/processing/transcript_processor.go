@@ -180,7 +180,7 @@ func sanitizePatientData(data PatientData) PatientData {
 			data.Gender = "" // Reset to empty if invalid
 		}
 	}
-	
+
 	// Remove any medication entries that match gender values
 	filteredMeds := make([]string, 0)
 	for _, med := range data.Medications {
@@ -189,19 +189,19 @@ func sanitizePatientData(data PatientData) PatientData {
 		}
 	}
 	data.Medications = filteredMeds
-	
+
 	// Clean empty entries
 	data.Symptoms = removeEmptyStrings(data.Symptoms)
 	data.Conditions = removeEmptyStrings(data.Conditions)
 	data.Medications = removeEmptyStrings(data.Medications)
 	data.Allergies = removeEmptyStrings(data.Allergies)
-	
+
 	// Remove "none" entries
 	data.Medications = removeStringFromSlice(data.Medications, "none")
 	data.Allergies = removeStringFromSlice(data.Allergies, "none")
 	data.Symptoms = removeStringFromSlice(data.Symptoms, "none")
 	data.Conditions = removeStringFromSlice(data.Conditions, "none")
-	
+
 	return data
 }
 

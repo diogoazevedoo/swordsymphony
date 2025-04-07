@@ -6,6 +6,7 @@ import (
 
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/call"
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/twilio"
+	"github.com/diogoazevedoo/swordsymphony/internal/conversation"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -116,7 +117,7 @@ func (c *CallController) HandleStatusCallback(ctx *gin.Context) {
 	webhookHandler.HandleStatusCallback(ctx)
 }
 
-// HandleSpeechCallback processes speech input from Twilio
+// HandleSpeechCallback processes speech input from Twilio for inbound calls
 func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 	callSID := ctx.Query("call_sid")
 	if callSID == "" {
@@ -128,62 +129,47 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 	speechInput := ctx.PostForm("SpeechResult")
 	logger.Info("Speech callback received",
 		"call_sid", callSID,
-		"input", speechInput,
-		"input_length", len(speechInput))
+		"input", speechInput)
 
-	// Always continue even with empty input - just use a placeholder
-	if speechInput == "" || len(speechInput) < 2 {
-		speechInput = "No response provided" // Descriptive placeholder
-		logger.Warn("Empty or very short speech input, using placeholder", 
-			"call_sid", callSID,
-			"original_input", speechInput)
+	// Always continue even with empty input
+	if speechInput == "" {
+		speechInput = "No response provided"
 	}
 
-	// Process the speech input - this will also advance the question index
-	// Even if there's an error, we still want the call to continue
-	response, err := c.callService.ProcessSpeechInput(callSID, speechInput)
+	// Get the call state
+	callState, err := c.callService.GetCallState(callSID)
 	if err != nil {
-		logger.Error("Failed to process speech input, using fallback", 
-			"error", err, 
-			"call_sid", callSID)
-
-		// Use a simple continuation message instead of stopping the flow
-		response = "Let's continue to the next question."
-		
-		// Try to get the current state so we can continue
-		// Any errors here are non-fatal - we'll still proceed with the simple response
-		currentState, stateErr := c.callService.GetCallState(callSID)
-		if stateErr == nil && currentState != nil {
-			if nextQuestion, qErr := c.callService.GetNextQuestionForCall(callSID); qErr == nil && nextQuestion != "" {
-				response = nextQuestion // Use the actual next question if available
-			}
-		}
-	}
-
-	// Try to generate audio, but have a solid fallback if it fails
-	_, audioErr := c.callService.GenerateAudioResponse(callSID, response)
-	if audioErr != nil {
-		logger.Error("Failed to generate audio, using TTS fallback", 
-			"error", audioErr, 
-			"call_sid", callSID,
-			"response_text", response)
-
-		// Fall back to Twilio's text-to-speech with the response
-		twiML := generateTwiMLWithSay(response, callSID, c.callService.GetBaseURL())
-		ctx.Header("Content-Type", "text/xml")
-		ctx.String(http.StatusOK, twiML)
+		logger.Error("Failed to get call state", "error", err)
+		ctx.String(http.StatusInternalServerError, generateErrorTwiML("Technical difficulties. Please try again later."))
 		return
 	}
 
-	// Use the generated audio with longer timeouts for better user experience
-	audioURL := c.callService.GetBaseURL() + "/api/call/audio/" + callSID
-	twiML := generateTwiMLWithAudio(audioURL, callSID, c.callService.GetBaseURL())
-	
-	logger.Info("Sending audio response",
-		"call_sid", callSID,
-		"audio_url", audioURL,
-		"response_text", response)
+	// Store the patient's response
+	if err := c.callService.GetConversationManager().AddMessage(
+		callState.ConversationID,
+		conversation.MessageTypePatient,
+		speechInput); err != nil {
+		logger.Error("Failed to add patient response", "error", err)
+	}
 
+	// Increment the question counter to move to the next question
+	if err := c.callService.IncrementQuestionCounter(callSID); err != nil {
+		logger.Error("Failed to increment question counter", "error", err)
+	}
+
+	// Generate the next response using the inbound call handler
+	twiML, err := c.callService.HandleInboundCall(ctx, twilio.CallEvent{
+		CallSID: callSID,
+		From:    callState.PatientPhone,
+	})
+
+	if err != nil {
+		logger.Error("Failed to handle call", "error", err)
+		ctx.String(http.StatusInternalServerError, generateErrorTwiML("Technical difficulties. Please try again later."))
+		return
+	}
+
+	// Return the TwiML response
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiML)
 }
@@ -283,4 +269,119 @@ func generateTwiMLWithAudio(audioURL, callSID, baseURL string) string {
 			"timeout":       "15", // 15 seconds total for input
 		}),
 	)
+}
+
+// StartSimpleCall initiates a simplified call flow
+func (c *CallController) StartSimpleCall(ctx *gin.Context) {
+	var request struct {
+		PhoneNumber string `json:"phone_number" binding:"required"`
+	}
+
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"message": "Invalid request",
+				"details": err.Error(),
+			},
+		})
+		return
+	}
+
+	conversationID, err := c.callService.SimpleConversationFlow(request.PhoneNumber)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"message": "Failed to start simple call flow",
+				"details": err.Error(),
+			},
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message":         "Simple call flow initiated successfully",
+			"conversation_id": conversationID,
+		},
+	})
+}
+
+// ProcessCallToCase processes a completed call into a case
+func (c *CallController) ProcessCallToCase(ctx *gin.Context) {
+	conversationID := ctx.Param("conversation_id")
+	if conversationID == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"message": "Conversation ID is required",
+			},
+		})
+		return
+	}
+
+	caseID, err := c.callService.ProcessConversationToCase(conversationID)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"message": "Failed to process conversation to case",
+				"details": err.Error(),
+			},
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message": "Conversation processed successfully",
+			"case_id": caseID,
+		},
+	})
+}
+
+// ProcessCallConversation manually processes a call conversation into a patient case
+func (c *CallController) ProcessCallConversation(ctx *gin.Context) {
+	callSID := ctx.Param("call_sid")
+	if callSID == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Call SID is required",
+		})
+		return
+	}
+
+	// Get the conversation ID from the call
+	callState, err := c.callService.GetCallState(callSID)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   "Call not found or already processed",
+		})
+		return
+	}
+
+	conversationID := callState.ConversationID
+
+	// Process the conversation
+	processResult, err := c.callService.ProcessConversationToCase(conversationID)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to process conversation: " + err.Error(),
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message":         "Call processed successfully",
+			"case_id":         processResult,
+			"conversation_id": conversationID,
+		},
+	})
 }

@@ -128,12 +128,12 @@ func (m *ConversationManager) AddMessage(conversationID string, messageType Mess
 	// Important: We don't automatically advance the question index here
 	// That's handled explicitly by the call service to maintain control
 	// of the conversation flow without skipping questions
-	
+
 	logger.Info("Added message to conversation",
 		"conversation_id", conversationID,
 		"message_type", string(messageType),
 		"content_length", len(content),
-		"question_index", conversation.QuestionIndex,  // This will not change here
+		"question_index", conversation.QuestionIndex, // This will not change here
 		"transcript_length", len(conversation.Transcript))
 
 	return nil
@@ -193,7 +193,7 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 	// This ensures we maintain the correct question/answer pairing
 	var questions []string
 	answers := make(map[int]string)
-	
+
 	// First, identify all the questions in order
 	for i, msg := range conversation.Transcript {
 		if msg.Type == MessageTypeAI {
@@ -201,9 +201,9 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 			for questionIdx, predefinedQuestion := range m.questions {
 				if msg.Content == predefinedQuestion {
 					questions = append(questions, fmt.Sprintf("Q%d: %s", questionIdx+1, msg.Content))
-					
+
 					// Check if there's a patient response following this question
-					if i+1 < len(conversation.Transcript) && 
+					if i+1 < len(conversation.Transcript) &&
 						conversation.Transcript[i+1].Type == MessageTypePatient {
 						answers[questionIdx] = conversation.Transcript[i+1].Content
 					}
@@ -212,21 +212,21 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 			}
 		}
 	}
-	
+
 	// Now format the Q&A pairs explicitly by question number
 	var formatted string
 	formatted = "CONVERSATION TRANSCRIPT WITH EXPLICIT QUESTION/ANSWER PAIRS:\n\n"
-	
+
 	for i, questionText := range m.questions {
 		formatted += fmt.Sprintf("Question %d: %s\n", i+1, questionText)
-		
+
 		if answer, exists := answers[i]; exists {
 			formatted += fmt.Sprintf("Answer %d: %s\n\n", i+1, answer)
 		} else {
 			formatted += "Answer: [No response provided]\n\n"
 		}
 	}
-	
+
 	// Add guidance for the extraction
 	formatted += "\nEXTRACTION INSTRUCTIONS:\n"
 	formatted += "- Extract name from Question 1\n"
@@ -245,11 +245,11 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 func (m *ConversationManager) GetQuestions() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	// Return a copy of the questions slice to avoid external modifications
 	questionsCopy := make([]string, len(m.questions))
 	copy(questionsCopy, m.questions)
-	
+
 	return questionsCopy
 }
 
@@ -257,13 +257,13 @@ func (m *ConversationManager) GetQuestions() []string {
 func (m *ConversationManager) GetQuestionByIndex(conversationID string, index int) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	// Validate conversation exists
 	_, exists := m.activeConversations[conversationID]
 	if !exists {
 		return "", fmt.Errorf("conversation not found: %s", conversationID)
 	}
-	
+
 	// Check if index is valid
 	if index < 0 || index >= len(m.questions) {
 		// Return the last question as a fallback
@@ -272,6 +272,6 @@ func (m *ConversationManager) GetQuestionByIndex(conversationID string, index in
 		}
 		return "", fmt.Errorf("invalid question index: %d", index)
 	}
-	
+
 	return m.questions[index], nil
 }
