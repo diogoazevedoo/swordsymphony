@@ -124,6 +124,22 @@ func (p *TranscriptProcessor) ProcessTranscript(
 			"case_id", patientData.ID)
 	}
 
+	workflowResults, err := p.waitForWorkflowCompletion(ctx, instanceID, 300) // 5-minute timeout
+	if err != nil {
+		logger.Warn("Failed to wait for workflow completion",
+			"error", err,
+			"instance_id", instanceID)
+	} else if workflowResults != nil {
+		if p.resultRepository != nil {
+			err := p.resultRepository.StoreResults(patientData.ID, workflowResults)
+			if err != nil {
+				logger.Error("Failed to store workflow results", "error", err, "case_id", patientData.ID)
+			} else {
+				logger.Info("Stored complete workflow results", "case_id", patientData.ID)
+			}
+		}
+	}
+
 	result := &ProcessingResult{
 		CaseID:      patientData.ID,
 		PatientData: patientData,
@@ -399,4 +415,51 @@ func extractJSON(text string) string {
 	}
 
 	return `{"name":"","age":0,"gender":"","symptoms":[],"conditions":[],"medications":[],"allergies":[]}`
+}
+
+// waitForWorkflowCompletion waits for the workflow to complete and returns the output
+func (p *TranscriptProcessor) waitForWorkflowCompletion(ctx context.Context, instanceID uuid.UUID, timeoutSeconds int) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	apiURL := fmt.Sprintf("%s/api/workflow-instances/%s", p.apiBaseURL, instanceID)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting for workflow completion")
+		case <-ticker.C:
+			req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+			if err != nil {
+				continue
+			}
+
+			resp, err := p.httpClient.Do(req)
+			if err != nil {
+				continue
+			}
+
+			var instance struct {
+				Data struct {
+					Status string         `json:"status"`
+					Output map[string]any `json:"output"`
+				} `json:"data"`
+			}
+
+			if err := json.NewDecoder(resp.Body).Decode(&instance); err != nil {
+				resp.Body.Close()
+				continue
+			}
+			resp.Body.Close()
+
+			if instance.Data.Status == "completed" {
+				return instance.Data.Output, nil
+			} else if instance.Data.Status == "failed" {
+				return nil, fmt.Errorf("workflow failed")
+			}
+		}
+	}
 }
