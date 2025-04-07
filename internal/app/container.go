@@ -124,14 +124,12 @@ func (c *Container) initRepositories() error {
 
 // Initialize communication services
 func (c *Container) initCommunicationServices() error {
-	// Initialize Twilio client
 	c.TwilioClient = twilio.NewClient(
 		c.Config.Twilio.AccountSID,
 		c.Config.Twilio.AuthToken,
 		c.Config.Twilio.PhoneNumber,
 	)
 
-	// Initialize ElevenLabs client
 	c.ElevenLabsClient = elevenlabs.NewClient(
 		c.Config.ElevenLabs.APIKey,
 		elevenlabs.WithVoiceID(c.Config.ElevenLabs.VoiceID),
@@ -140,7 +138,6 @@ func (c *Container) initCommunicationServices() error {
 		elevenlabs.WithSimilarity(c.Config.ElevenLabs.SimilarityBoost),
 	)
 
-	// Initialize Deepgram client
 	c.DeepgramClient = deepgram.NewClient(
 		c.Config.Deepgram.APIKey,
 		deepgram.WithLanguage(c.Config.Deepgram.Language),
@@ -148,7 +145,6 @@ func (c *Container) initCommunicationServices() error {
 		deepgram.WithTier(c.Config.Deepgram.Tier),
 	)
 
-	// Initialize Email sender
 	c.EmailSender = email.NewSender(
 		c.Config.Email.SMTPServer,
 		c.Config.Email.SMTPPort,
@@ -159,7 +155,6 @@ func (c *Container) initCommunicationServices() error {
 		c.Config.Email.TemplatesDir,
 	)
 
-	// Load email templates
 	if err := c.EmailSender.LoadTemplates(); err != nil {
 		logger.Warn("Failed to load email templates", "error", err)
 	}
@@ -170,10 +165,8 @@ func (c *Container) initCommunicationServices() error {
 
 // Initialize conversation and workflow services
 func (c *Container) initConversationServices() error {
-	// Initialize conversation manager (simplified version)
 	c.ConversationManager = conversation.NewConversationManager()
 
-	// Initialize workflow service (still needed for other parts of the app)
 	workflowEngine := workflow.NewWorkflowEngine()
 	workflowService := workflow.NewWorkflowService(workflowEngine, "./configs/workflows")
 
@@ -181,11 +174,8 @@ func (c *Container) initConversationServices() error {
 		logger.Warn("Failed to initialize workflow service", "error", err)
 	}
 
-	// Simply use the Twilio webhook base URL for the transcript processor
-	// This URL is already configured correctly for external access
 	baseURL := c.Config.Twilio.WebhookBaseURL
 
-	// Create transcript processor using the same base URL
 	c.TranscriptProcessor = processing.NewTranscriptProcessor(
 		c.AIClient,
 		c.CaseRepo,
@@ -193,7 +183,6 @@ func (c *Container) initConversationServices() error {
 		baseURL,
 	)
 
-	// Initialize call service with the same base URL
 	c.CallService = call.NewService(
 		c.TwilioClient,
 		c.ElevenLabsClient,

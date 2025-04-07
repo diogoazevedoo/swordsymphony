@@ -87,7 +87,7 @@ func (s *WorkflowService) SelectWorkflow(patientData map[string]any) (string, er
 	})
 
 	for i, score := range scores {
-		if i < 3 { // Log top 3 scores
+		if i < 3 {
 			logger.Info("Workflow score",
 				"position", i+1,
 				"workflow_id", score.ID,
@@ -199,8 +199,6 @@ func (s *WorkflowService) GetResults(instanceID uuid.UUID) (map[string]any, erro
 
 	return instance.Output, nil
 }
-
-// Helper functions
 
 // detectEmergency checks if the symptoms/conditions indicate an emergency
 func detectEmergency(symptoms, conditions []string) bool {
@@ -336,14 +334,12 @@ func extractStringSlice(data map[string]any, key string) []string {
 func (s *WorkflowService) GetAllServices() []interface{} {
 	services := make([]interface{}, 0)
 
-	// Add the result repository if available
 	if s.workflowEngine != nil {
 		if resultRepo := s.workflowEngine.GetResultRepository(); resultRepo != nil {
 			services = append(services, resultRepo)
 		}
 	}
 
-	// Add the workflow service itself
 	services = append(services, s.workflowService)
 
 	return services

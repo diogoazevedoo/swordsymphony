@@ -95,8 +95,6 @@ func (c *CallController) EndCall(ctx *gin.Context) {
 
 // GetCallResults retrieves the results of a call
 func (c *CallController) GetCallResults(ctx *gin.Context) {
-	// This endpoint is not needed in the new implementation
-	// since we process calls automatically after completion
 	ctx.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
@@ -131,12 +129,10 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		"call_sid", callSID,
 		"input", speechInput)
 
-	// Always continue even with empty input
 	if speechInput == "" {
 		speechInput = "No response provided"
 	}
 
-	// Get the call state
 	callState, err := c.callService.GetCallState(callSID)
 	if err != nil {
 		logger.Error("Failed to get call state", "error", err)
@@ -144,7 +140,6 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		return
 	}
 
-	// Store the patient's response
 	if err := c.callService.GetConversationManager().AddMessage(
 		callState.ConversationID,
 		conversation.MessageTypePatient,
@@ -152,12 +147,10 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		logger.Error("Failed to add patient response", "error", err)
 	}
 
-	// Increment the question counter to move to the next question
 	if err := c.callService.IncrementQuestionCounter(callSID); err != nil {
 		logger.Error("Failed to increment question counter", "error", err)
 	}
 
-	// Generate the next response using the inbound call handler
 	twiML, err := c.callService.HandleInboundCall(ctx, twilio.CallEvent{
 		CallSID: callSID,
 		From:    callState.PatientPhone,
@@ -169,7 +162,6 @@ func (c *CallController) HandleSpeechCallback(ctx *gin.Context) {
 		return
 	}
 
-	// Return the TwiML response
 	ctx.Header("Content-Type", "text/xml")
 	ctx.String(http.StatusOK, twiML)
 }
@@ -191,83 +183,15 @@ func (c *CallController) GetAudio(ctx *gin.Context) {
 
 	ctx.Header("Content-Type", "audio/mpeg")
 	ctx.Header("Content-Length", fmt.Sprintf("%d", len(audioData)))
-	ctx.Header("Cache-Control", "public, max-age=60") // Cache for 1 minute
+	ctx.Header("Cache-Control", "public, max-age=60")
 
 	ctx.Data(http.StatusOK, "audio/mpeg", audioData)
 }
-
-// StoreAudio stores audio data for a call
-func (c *CallController) StoreAudio(ctx *gin.Context) {
-	// This endpoint is not needed in the new implementation
-	// since we store audio directly in the call service
-	ctx.Status(http.StatusOK)
-}
-
-// HandleStreamingAudio processes streaming audio - not needed
-func (c *CallController) HandleStreamingAudio(ctx *gin.Context) {
-	// This endpoint is not needed in the new implementation
-	ctx.Status(http.StatusOK)
-}
-
-// UploadRecordedFile uploads a recorded file - not needed
-func (c *CallController) UploadRecordedFile(ctx *gin.Context) {
-	// This endpoint is not needed in the new implementation
-	ctx.Status(http.StatusOK)
-}
-
-// GetResponse streams the audio response - not needed
-func (c *CallController) GetResponse(ctx *gin.Context) {
-	// This endpoint is not needed in the new implementation
-	ctx.Status(http.StatusOK)
-}
-
-// Helper functions
 
 // generateErrorTwiML generates TwiML for error responses
 func generateErrorTwiML(message string) string {
 	return twilio.GenerateTwiML(
 		twilio.SayAction(message, "alice", "en-US"),
-	)
-}
-
-// generateRepeatTwiML generates TwiML asking the user to repeat
-func generateRepeatTwiML(callSID, baseURL string) string {
-	return twilio.GenerateTwiML(
-		twilio.SayAction("I didn't catch that. Could you please respond to the question?", "alice", "en-US"),
-		twilio.GatherAction("", map[string]string{
-			"input":         "speech",
-			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", baseURL, callSID),
-			"language":      "en-US",
-			"speechTimeout": "auto",
-		}),
-	)
-}
-
-// generateTwiMLWithSay generates TwiML with Say verb
-func generateTwiMLWithSay(message, callSID, baseURL string) string {
-	return twilio.GenerateTwiML(
-		twilio.SayAction(message, "alice", "en-US"),
-		twilio.GatherAction("", map[string]string{
-			"input":         "speech",
-			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", baseURL, callSID),
-			"language":      "en-US",
-			"speechTimeout": "5",  // 5 seconds of silence before timing out
-			"timeout":       "15", // 15 seconds total for input
-		}),
-	)
-}
-
-// generateTwiMLWithAudio generates TwiML with Play verb for audio
-func generateTwiMLWithAudio(audioURL, callSID, baseURL string) string {
-	return twilio.GenerateTwiML(
-		twilio.PlayAction(audioURL),
-		twilio.GatherAction("", map[string]string{
-			"input":         "speech",
-			"action":        fmt.Sprintf("%s/api/call/speech?call_sid=%s", baseURL, callSID),
-			"language":      "en-US",
-			"speechTimeout": "5",  // 5 seconds of silence before timing out
-			"timeout":       "15", // 15 seconds total for input
-		}),
 	)
 }
 
@@ -354,7 +278,6 @@ func (c *CallController) ProcessCallConversation(ctx *gin.Context) {
 		return
 	}
 
-	// Get the conversation ID from the call
 	callState, err := c.callService.GetCallState(callSID)
 	if err != nil {
 		ctx.JSON(http.StatusNotFound, gin.H{
@@ -366,7 +289,6 @@ func (c *CallController) ProcessCallConversation(ctx *gin.Context) {
 
 	conversationID := callState.ConversationID
 
-	// Process the conversation
 	processResult, err := c.callService.ProcessConversationToCase(conversationID)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{

@@ -1536,30 +1536,6 @@ func (rs *ResultStorage) GetResults(caseID string) (map[string]any, error) {
 	return results, nil
 }
 
-// safeGet extracts a value from a nested map using a dot-notation path
-func safeGet(data map[string]any, path string) any {
-	if data == nil {
-		return nil
-	}
-
-	parts := strings.Split(path, ".")
-	current := data
-
-	for i, part := range parts {
-		if i == len(parts)-1 {
-			return current[part]
-		}
-
-		if nextMap, ok := current[part].(map[string]any); ok {
-			current = nextMap
-		} else {
-			return nil
-		}
-	}
-
-	return nil
-}
-
 // extractCaseID gets the case ID from the input data
 func extractCaseID(input map[string]any) string {
 	if input == nil {

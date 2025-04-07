@@ -130,13 +130,11 @@ func LoadConfig() (*Config, error) {
 
 	medicalDataPath := getEnv("MEDICAL_DATA_PATH", "")
 
-	// Twilio configuration
 	twilioAccountSID := getEnv("TWILIO_ACCOUNT_SID", "")
 	twilioAuthToken := getEnv("TWILIO_AUTH_TOKEN", "")
 	twilioPhoneNumber := getEnv("TWILIO_PHONE_NUMBER", "")
 	twilioWebhookBaseURL := getEnv("TWILIO_WEBHOOK_BASE_URL", "")
 
-	// ElevenLabs configuration
 	elevenLabsAPIKey := getEnv("ELEVENLABS_API_KEY", "")
 	elevenLabsVoiceID := getEnv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 	elevenLabsModelID := getEnv("ELEVENLABS_MODEL_ID", "eleven_monolingual_v1")
@@ -153,13 +151,11 @@ func LoadConfig() (*Config, error) {
 		elevenLabsSimilarityBoost = 0.75
 	}
 
-	// Deepgram configuration
 	deepgramAPIKey := getEnv("DEEPGRAM_API_KEY", "")
 	deepgramLanguage := getEnv("DEEPGRAM_LANGUAGE", "en-US")
 	deepgramModel := getEnv("DEEPGRAM_MODEL", "general")
 	deepgramTier := getEnv("DEEPGRAM_TIER", "enhanced")
 
-	// Email configuration
 	emailSMTPServer := getEnv("EMAIL_SMTP_SERVER", "smtp.gmail.com")
 	emailSMTPPortStr := getEnv("EMAIL_SMTP_PORT", "587")
 	emailUsername := getEnv("EMAIL_USERNAME", "")

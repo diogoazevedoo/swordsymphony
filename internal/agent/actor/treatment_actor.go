@@ -165,15 +165,12 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 
 	a.SetState("current_treatment_plan", treatmentPlan)
 
-	// Get the case ID from the patient data
 	caseID := a.extractCaseID(patientData)
 
-	// Log the extracted case ID
 	logger.Info("Extracted case ID for treatment storage",
 		"case_id", caseID,
 		"method", "direct extraction")
 
-	// Store the results
 	if a.resultRepository != nil && caseID != "" {
 		results := map[string]any{
 			"diagnosis":      diagnosis,
@@ -183,7 +180,6 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 			"agent_type":     "treatment_agent",
 		}
 
-		// Attempt to store the results
 		err := a.resultRepository.StoreResults(caseID, results)
 		if err != nil {
 			logger.Error("Failed to store treatment results",
@@ -194,7 +190,6 @@ func (a *TreatmentActor) Receive(ctx context.Context, envelope *actor.Envelope) 
 				"case_id", caseID,
 				"result_keys", getMapKeys(results))
 
-			// Verify that results were stored by attempting to retrieve them
 			verifyResults, verifyErr := a.resultRepository.GetResultsByCaseID(caseID)
 			if verifyErr != nil {
 				logger.Error("Failed to verify result storage - cannot retrieve results",
@@ -457,25 +452,21 @@ func validateAndNormalizeTreatmentResponse(treatment map[string]any) {
 
 // extractCaseID ensures consistent case ID extraction across the system
 func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
-	// Try different possible keys and paths for finding the case ID
 	caseIDPaths := [][]string{
-		{"case_id"},         // Direct case_id field
-		{"id"},              // Direct id field
-		{"patient_id"},      // Direct patient_id field
-		{"data", "id"},      // Nested in data.id
-		{"data", "case_id"}, // Nested in data.case_id
+		{"case_id"},
+		{"id"},
+		{"patient_id"},
+		{"data", "id"},
+		{"data", "case_id"},
 	}
 
-	// First try the direct paths
 	for _, path := range caseIDPaths {
 		if len(path) == 1 {
-			// Try direct key
 			if idVal, ok := patientData[path[0]].(string); ok && idVal != "" {
 				logger.Info("Found case ID using direct path", "path", path[0], "value", idVal)
 				return idVal
 			}
 		} else if len(path) == 2 {
-			// Try nested structure
 			if dataMap, ok := patientData[path[0]].(map[string]any); ok {
 				if idVal, ok := dataMap[path[1]].(string); ok && idVal != "" {
 					logger.Info("Found case ID using nested path", "path", path[0]+"."+path[1], "value", idVal)
@@ -485,15 +476,12 @@ func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
 		}
 	}
 
-	// If direct ID extraction fails, try using the conversation ID as a fallback
 	if convID, ok := patientData["conversation_id"].(string); ok && convID != "" {
-		// Make it database-friendly by adding a prefix
 		caseID := "case_" + convID
 		logger.Info("Using conversation ID as case ID", "conversation_id", convID, "case_id", caseID)
 		return caseID
 	}
 
-	// If there's a name field, use a combination of name and timestamp as ID
 	if name, ok := patientData["name"].(string); ok && name != "" {
 		sanitizedName := strings.ReplaceAll(name, " ", "_")
 		sanitizedName = strings.ReplaceAll(sanitizedName, "'", "")
@@ -503,7 +491,6 @@ func (a *TreatmentActor) extractCaseID(patientData map[string]any) string {
 		return id
 	}
 
-	// Last resort - generate a unique ID
 	generatedID := fmt.Sprintf("case_%d", time.Now().UnixNano())
 	logger.Info("Generated fallback case ID", "id", generatedID)
 	return generatedID

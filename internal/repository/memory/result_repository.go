@@ -42,12 +42,10 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		}
 	}
 
-	// Merge with new results
 	for k, v := range results {
 		existingResults[k] = deepCopy(v)
 	}
 
-	// Store final results
 	r.results[caseID] = existingResults
 
 	logger.Info("Successfully stored results in memory repository",
@@ -79,9 +77,7 @@ func (r *ResultRepository) GetResultsByCaseID(caseID string) (map[string]any, er
 
 	results, exists := r.results[caseID]
 	if !exists {
-		// Try alternative keys
 		for id, res := range r.results {
-			// Check if this is a nested case ID
 			if patientData, ok := res["patient_data"].(map[string]any); ok {
 				if patientID, ok := patientData["id"].(string); ok && patientID == caseID {
 					logger.Info("Found results using nested patient ID",
@@ -95,7 +91,6 @@ func (r *ResultRepository) GetResultsByCaseID(caseID string) (map[string]any, er
 		return nil, errors.NotFound("No results found for case", "results_not_found")
 	}
 
-	// Return a deep copy to prevent modification of stored data
 	return deepCopyMap(results), nil
 }
 
@@ -111,7 +106,6 @@ func deepCopy(v any) any {
 	case []any:
 		return deepCopySlice(val)
 	default:
-		// For primitive types, return as is
 		return v
 	}
 }
@@ -167,7 +161,6 @@ func (r *ResultRepository) PrettyPrintResults() string {
 		output += fmt.Sprintf("Case ID: %s\n", id)
 		output += fmt.Sprintf("  Keys: %v\n", getMapKeys(results))
 
-		// Attempt to print details of important fields
 		if diagnosis, ok := results["diagnosis"].(map[string]any); ok {
 			output += fmt.Sprintf("  Diagnosis keys: %v\n", getMapKeys(diagnosis))
 		}

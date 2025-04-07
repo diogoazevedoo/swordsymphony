@@ -36,7 +36,6 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 		{
 			call.POST("/start", callH.StartCall)
 			call.POST("/process/call/:call_sid", callH.ProcessCallConversation)
-			call.GET("/response/:call_sid", callH.GetResponse)
 			call.POST("/end/:call_sid", callH.EndCall)
 			call.GET("/results/:call_sid", callH.GetCallResults)
 
@@ -44,10 +43,7 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 			call.POST("/status", callH.HandleStatusCallback)
 			call.POST("/speech", callH.HandleSpeechCallback)
 
-			call.POST("/audio/:call_sid", callH.StoreAudio)
 			call.GET("/audio/:call_sid", callH.GetAudio)
-			call.POST("/stream/:call_sid", callH.HandleStreamingAudio)
-			call.POST("/upload", callH.UploadRecordedFile)
 		}
 
 		admin := api.Group("/management")

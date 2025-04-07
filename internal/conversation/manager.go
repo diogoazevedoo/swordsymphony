@@ -30,7 +30,7 @@ type Conversation struct {
 	StartTime     time.Time         `json:"start_time"`
 	EndTime       time.Time         `json:"end_time"`
 	IsActive      bool              `json:"is_active"`
-	QuestionIndex int               `json:"question_index"` // Current question index
+	QuestionIndex int               `json:"question_index"`
 	Transcript    []Message         `json:"transcript"`
 	Metadata      map[string]string `json:"metadata"`
 }
@@ -38,7 +38,7 @@ type Conversation struct {
 // ConversationManager handles medical conversations
 type ConversationManager struct {
 	activeConversations map[string]*Conversation
-	questions           []string // List of questions in order
+	questions           []string
 	mu                  sync.RWMutex
 }
 
@@ -65,7 +65,6 @@ func (m *ConversationManager) StartConversation(patientPhone string) (*Conversat
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if there's already an active conversation for this patient
 	for _, conv := range m.activeConversations {
 		if conv.PatientPhone == patientPhone && conv.IsActive {
 			logger.Info("Found existing active conversation",
@@ -75,10 +74,8 @@ func (m *ConversationManager) StartConversation(patientPhone string) (*Conversat
 		}
 	}
 
-	// Generate a unique conversation ID
 	conversationID := fmt.Sprintf("conv_%s", time.Now().Format("20060102150405.000000"))
 
-	// Create a new conversation
 	conversation := &Conversation{
 		ID:            conversationID,
 		PatientPhone:  patientPhone,
@@ -125,15 +122,11 @@ func (m *ConversationManager) AddMessage(conversationID string, messageType Mess
 
 	conversation.Transcript = append(conversation.Transcript, message)
 
-	// Important: We don't automatically advance the question index here
-	// That's handled explicitly by the call service to maintain control
-	// of the conversation flow without skipping questions
-
 	logger.Info("Added message to conversation",
 		"conversation_id", conversationID,
 		"message_type", string(messageType),
 		"content_length", len(content),
-		"question_index", conversation.QuestionIndex, // This will not change here
+		"question_index", conversation.QuestionIndex,
 		"transcript_length", len(conversation.Transcript))
 
 	return nil
@@ -149,12 +142,10 @@ func (m *ConversationManager) GetNextQuestion(conversationID string) (string, er
 		return "", fmt.Errorf("conversation not found: %s", conversationID)
 	}
 
-	// If we're at or past the end of questions, return the goodbye message
 	if conversation.QuestionIndex >= len(m.questions) {
 		return m.questions[len(m.questions)-1], nil
 	}
 
-	// Return the current question
 	return m.questions[conversation.QuestionIndex], nil
 }
 
@@ -189,20 +180,15 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 		return "", fmt.Errorf("conversation not found: %s", conversationID)
 	}
 
-	// Create a mapped representation of the transcript to ensure questions and answers line up
-	// This ensures we maintain the correct question/answer pairing
 	var questions []string
 	answers := make(map[int]string)
 
-	// First, identify all the questions in order
 	for i, msg := range conversation.Transcript {
 		if msg.Type == MessageTypeAI {
-			// Check if this question matches one of our predefined questions
 			for questionIdx, predefinedQuestion := range m.questions {
 				if msg.Content == predefinedQuestion {
 					questions = append(questions, fmt.Sprintf("Q%d: %s", questionIdx+1, msg.Content))
 
-					// Check if there's a patient response following this question
 					if i+1 < len(conversation.Transcript) &&
 						conversation.Transcript[i+1].Type == MessageTypePatient {
 						answers[questionIdx] = conversation.Transcript[i+1].Content
@@ -213,7 +199,6 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 		}
 	}
 
-	// Now format the Q&A pairs explicitly by question number
 	var formatted string
 	formatted = "CONVERSATION TRANSCRIPT WITH EXPLICIT QUESTION/ANSWER PAIRS:\n\n"
 
@@ -227,7 +212,6 @@ func (m *ConversationManager) FormatTranscriptForProcessing(conversationID strin
 		}
 	}
 
-	// Add guidance for the extraction
 	formatted += "\nEXTRACTION INSTRUCTIONS:\n"
 	formatted += "- Extract name from Question 1\n"
 	formatted += "- Extract age from Question 2\n"
@@ -246,7 +230,6 @@ func (m *ConversationManager) GetQuestions() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Return a copy of the questions slice to avoid external modifications
 	questionsCopy := make([]string, len(m.questions))
 	copy(questionsCopy, m.questions)
 
@@ -258,15 +241,12 @@ func (m *ConversationManager) GetQuestionByIndex(conversationID string, index in
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Validate conversation exists
 	_, exists := m.activeConversations[conversationID]
 	if !exists {
 		return "", fmt.Errorf("conversation not found: %s", conversationID)
 	}
 
-	// Check if index is valid
 	if index < 0 || index >= len(m.questions) {
-		// Return the last question as a fallback
 		if len(m.questions) > 0 {
 			return m.questions[len(m.questions)-1], nil
 		}

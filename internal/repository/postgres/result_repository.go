@@ -1,11 +1,9 @@
 package postgres
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/diogoazevedoo/swordsymphony/internal/errors"
 	"github.com/diogoazevedoo/swordsymphony/internal/logger"
@@ -37,7 +35,6 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		"case_id", caseID,
 		"result_keys", getMapKeys(results))
 
-	// Check if the case exists first
 	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
@@ -48,11 +45,9 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 	if err != nil {
 		logger.Error("Error checking if case exists", "case_id", caseID, "error", err)
 	} else if !caseExists {
-		// Try to create the case if it doesn't exist and we have patient data
 		if patientData, ok := results["patient_data"].(map[string]any); ok {
 			logger.Info("Case doesn't exist, attempting to create it", "case_id", caseID)
 
-			// Create the case
 			patientDataJSON, err := json.Marshal(patientData)
 			if err != nil {
 				logger.Error("Failed to marshal patient data", "error", err)
@@ -79,7 +74,6 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 		}
 	}
 
-	// Retrieve existing data if any
 	existingDataJSON := []byte("{}")
 	var existingData map[string]any
 
@@ -91,25 +85,21 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 	err = r.db.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID, &existingDataJSON)
 
 	if err == nil {
-		// We have existing data, parse it
 		if err := json.Unmarshal(existingDataJSON, &existingData); err != nil {
 			logger.Error("Failed to unmarshal existing data", "error", err)
 			existingData = make(map[string]any)
 		}
 
-		// Merge existing data with new results
 		for k, v := range results {
 			existingData[k] = v
 		}
 
-		// Marshal merged data
 		dataJSON, err := json.Marshal(existingData)
 		if err != nil {
 			logger.Error("Failed to marshal merged data", "error", err)
 			return errors.Internal("Failed to encode results to JSON", "json_encode_error")
 		}
 
-		// Update existing record
 		updateQuery := `
 			UPDATE results
 			SET data = $1, updated_at = NOW()
@@ -121,7 +111,6 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 			return errors.External(err, "Failed to update results", "db_update_error")
 		}
 	} else if err == sql.ErrNoRows {
-		// No existing data, create new record
 		dataJSON, err := json.Marshal(results)
 		if err != nil {
 			logger.Error("Failed to marshal new data", "error", err)
@@ -141,7 +130,6 @@ func (r *ResultRepository) StoreResults(caseID string, results map[string]any) e
 			return errors.External(err, "Failed to insert results", "db_insert_error")
 		}
 	} else {
-		// Unexpected error when checking for existing data
 		logger.Error("Failed to check for existing data", "error", err)
 		return errors.External(err, "Failed to check existing results", "db_check_error")
 	}
@@ -164,7 +152,6 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 	ctx, cancel := withTimeout(defaultQueryTimeout)
 	defer cancel()
 
-	// First try direct case_id match
 	query := `
         SELECT data 
         FROM results 
@@ -191,7 +178,6 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 		return nil, errors.External(err, "Failed to query results", "db_query_error")
 	}
 
-	// If not found by direct case_id, try looking up in cases table first
 	caseQuery := `
         SELECT id, data 
         FROM cases 
@@ -211,7 +197,6 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 		return nil, errors.External(err, "Failed to query case", "db_case_query_error")
 	}
 
-	// Now try to get results using the case's ID from the database
 	resultsQuery := `
         SELECT data 
         FROM results 
@@ -240,58 +225,6 @@ func (r *ResultRepository) GetResultsByCaseID(id string) (map[string]any, error)
 		"result_keys", getMapKeys(results))
 
 	return results, nil
-}
-
-// storeResultsWithTransaction stores results for a case within a transaction
-func (r *ResultRepository) storeResultsWithTransaction(caseID string, results map[string]any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted,
-	})
-	if err != nil {
-		return errors.External(err, "Failed to begin transaction", "db_transaction_error")
-	}
-	defer tx.Rollback()
-
-	resultsJSON, err := json.Marshal(results)
-	if err != nil {
-		return errors.Internal("Failed to encode results to JSON", "json_encode_error")
-	}
-
-	var existingID int
-	checkQuery := `SELECT id FROM results WHERE case_id = $1`
-	err = tx.QueryRowContext(ctx, checkQuery, caseID).Scan(&existingID)
-
-	if err == nil {
-		updateQuery := `
-            UPDATE results
-            SET data = $1, updated_at = NOW()
-            WHERE case_id = $2
-        `
-		_, err = tx.ExecContext(ctx, updateQuery, resultsJSON, caseID)
-		if err != nil {
-			return errors.External(err, "Failed to update results", "db_update_error")
-		}
-	} else if err == sql.ErrNoRows {
-		insertQuery := `
-            INSERT INTO results (case_id, data, created_at, updated_at)
-            VALUES ($1, $2, NOW(), NOW())
-        `
-		_, err = tx.ExecContext(ctx, insertQuery, resultsJSON, caseID)
-		if err != nil {
-			return errors.External(err, "Failed to insert results", "db_insert_error")
-		}
-	} else {
-		return errors.External(err, "Failed to check existing results", "db_check_error")
-	}
-
-	if err := tx.Commit(); err != nil {
-		return errors.External(err, "Failed to commit transaction", "db_commit_error")
-	}
-
-	return nil
 }
 
 // getMapKeys extracts all keys from a map for logging

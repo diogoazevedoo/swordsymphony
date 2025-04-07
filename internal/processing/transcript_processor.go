@@ -82,21 +82,17 @@ func (p *TranscriptProcessor) ProcessTranscript(
 		"conversation_id", conversationID,
 		"transcript_length", len(formattedTranscript))
 
-	// Extract patient data using AI
 	patientData, err := p.extractPatientData(ctx, formattedTranscript)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract patient data: %w", err)
 	}
 
-	// Post-process and clean up patient data
 	patientData = sanitizePatientData(patientData)
 
-	// Generate a case ID if needed
 	if patientData.ID == "" {
 		patientData.ID = fmt.Sprintf("P%d", time.Now().Unix())
 	}
 
-	// Log the processed data
 	logger.Info("Processed patient data",
 		"case_id", patientData.ID,
 		"name", patientData.Name,
@@ -107,18 +103,14 @@ func (p *TranscriptProcessor) ProcessTranscript(
 		"medications", strings.Join(patientData.Medications, ", "),
 		"allergies", strings.Join(patientData.Allergies, ", "))
 
-	// Store the case
 	if err := p.caseRepository.StoreCase(patientData.ID, patientDataToMap(patientData), false); err != nil {
 		logger.Error("Failed to store case", "error", err, "case_id", patientData.ID)
-		// Continue anyway, as this is non-fatal
 	} else {
 		logger.Info("Successfully stored case", "case_id", patientData.ID)
 	}
 
-	// Always use standard workflow for now
 	workflowID := "standard_diagnostic_workflow"
 
-	// Start workflow via API
 	instanceID, err := p.startWorkflowViaAPI(ctx, workflowID, patientDataToMap(patientData))
 	if err != nil {
 		logger.Error("Failed to start workflow via API",
@@ -132,7 +124,6 @@ func (p *TranscriptProcessor) ProcessTranscript(
 			"case_id", patientData.ID)
 	}
 
-	// Initial result with no diagnosis yet
 	result := &ProcessingResult{
 		CaseID:      patientData.ID,
 		PatientData: patientData,
@@ -141,7 +132,6 @@ func (p *TranscriptProcessor) ProcessTranscript(
 		CompletedAt: time.Now(),
 	}
 
-	// Store initial results
 	if p.resultRepository != nil {
 		resultMap := map[string]interface{}{
 			"patient_data":    patientDataToMap(patientData),
@@ -164,24 +154,19 @@ func (p *TranscriptProcessor) ProcessTranscript(
 
 // sanitizePatientData cleans and validates the patient data to ensure it's properly categorized
 func sanitizePatientData(data PatientData) PatientData {
-	// Check if a medication was mistakenly put in gender
-	if stringInSlice(strings.ToLower(data.Gender), []string{"male", "female", "other"}) == false {
-		// If gender doesn't match expected values, check if it appears to be a medication
+	if !stringInSlice(strings.ToLower(data.Gender), []string{"male", "female", "other"}) {
 		if data.Gender != "" {
-			// Move the value to medications if it's not empty
 			data.Medications = append(data.Medications, data.Gender)
 		}
-		// Set proper gender if available in medications
 		if stringInSlice("male", lowercaseSlice(data.Medications)) {
 			data.Gender = "male"
 		} else if stringInSlice("female", lowercaseSlice(data.Medications)) {
 			data.Gender = "female"
 		} else {
-			data.Gender = "" // Reset to empty if invalid
+			data.Gender = ""
 		}
 	}
 
-	// Remove any medication entries that match gender values
 	filteredMeds := make([]string, 0)
 	for _, med := range data.Medications {
 		if !stringInSlice(strings.ToLower(med), []string{"male", "female", "other"}) {
@@ -190,13 +175,11 @@ func sanitizePatientData(data PatientData) PatientData {
 	}
 	data.Medications = filteredMeds
 
-	// Clean empty entries
 	data.Symptoms = removeEmptyStrings(data.Symptoms)
 	data.Conditions = removeEmptyStrings(data.Conditions)
 	data.Medications = removeEmptyStrings(data.Medications)
 	data.Allergies = removeEmptyStrings(data.Allergies)
 
-	// Remove "none" entries
 	data.Medications = removeStringFromSlice(data.Medications, "none")
 	data.Allergies = removeStringFromSlice(data.Allergies, "none")
 	data.Symptoms = removeStringFromSlice(data.Symptoms, "none")
@@ -204,8 +187,6 @@ func sanitizePatientData(data PatientData) PatientData {
 
 	return data
 }
-
-// Helper functions for data sanitization
 
 // stringInSlice checks if a string is in a slice (case insensitive)
 func stringInSlice(str string, list []string) bool {
@@ -256,40 +237,33 @@ func (p *TranscriptProcessor) startWorkflowViaAPI(
 	workflowID string,
 	patientData map[string]interface{},
 ) (uuid.UUID, error) {
-	// Prepare input data for the workflow
 	inputData := map[string]interface{}{
 		"patient_data": patientData,
 	}
 
-	// Create JSON payload
 	jsonPayload, err := json.Marshal(inputData)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to marshal workflow input: %w", err)
 	}
 
-	// Create request
 	apiURL := fmt.Sprintf("%s/api/management/workflows/%s/instances", p.apiBaseURL, workflowID)
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to create API request: %w", err)
 	}
 
-	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 
-	// Send request
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to send API request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return uuid.Nil, fmt.Errorf("API returned non-success status: %d", resp.StatusCode)
 	}
 
-	// Parse response
 	var apiResponse struct {
 		Success bool `json:"success"`
 		Data    struct {
@@ -301,7 +275,6 @@ func (p *TranscriptProcessor) startWorkflowViaAPI(
 		return uuid.Nil, fmt.Errorf("failed to decode API response: %w", err)
 	}
 
-	// Convert instance ID to UUID
 	instanceID, err := uuid.Parse(apiResponse.Data.InstanceID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("invalid instance ID in response: %w", err)
@@ -350,27 +323,23 @@ Response must be valid JSON only.`
 
 	prompt := fmt.Sprintf(promptTemplate, transcript)
 
-	// Use a more powerful model like GPT-4 for extraction
 	response, err := p.aiClient.GenerateCompletion(ctx, prompt, ai.CompletionOptions{
 		MaxTokens:   1024,
 		Temperature: 0.1,
-		ModelName:   "gpt-4", // Use the most capable model for extraction
+		ModelName:   "gpt-4",
 	})
 
 	if err != nil {
 		return PatientData{}, fmt.Errorf("AI completion failed: %w", err)
 	}
 
-	// Extract JSON from response
 	jsonString := extractJSON(response.Text)
 
-	// Parse the JSON
 	var extractedData PatientData
 	if err := json.Unmarshal([]byte(jsonString), &extractedData); err != nil {
 		return PatientData{}, fmt.Errorf("failed to parse AI response: %w", err)
 	}
 
-	// Ensure we have valid data structure
 	if extractedData.Symptoms == nil {
 		extractedData.Symptoms = []string{}
 	}
@@ -384,7 +353,6 @@ Response must be valid JSON only.`
 		extractedData.Allergies = []string{}
 	}
 
-	// Generate ID if not present
 	if extractedData.ID == "" {
 		extractedData.ID = fmt.Sprintf("P%d", time.Now().Unix())
 	}
@@ -423,7 +391,6 @@ func patientDataToMap(data PatientData) map[string]interface{} {
 
 // Helper function to extract JSON from text
 func extractJSON(text string) string {
-	// Look for the first opening brace and last closing brace
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 
@@ -431,6 +398,5 @@ func extractJSON(text string) string {
 		return text[start : end+1]
 	}
 
-	// If no valid JSON is found, return a minimal JSON structure
 	return `{"name":"","age":0,"gender":"","symptoms":[],"conditions":[],"medications":[],"allergies":[]}`
 }
