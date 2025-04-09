@@ -20,6 +20,7 @@ type Client struct {
 	modelID    string
 	stability  float64
 	similarity float64
+	voiceStyle float64
 }
 
 // ClientOption configures an ElevenLabs client
@@ -34,10 +35,12 @@ type VoiceResponse struct {
 
 // VoiceOptions configures the voice settings for synthesis
 type VoiceOptions struct {
-	Stability       float64 `json:"stability,omitempty"`
-	SimilarityBoost float64 `json:"similarity_boost,omitempty"`
-	Style           float64 `json:"style,omitempty"`
-	SpeakerBoost    bool    `json:"speaker_boost,omitempty"`
+	Stability           float64 `json:"stability,omitempty"`
+	SimilarityBoost     float64 `json:"similarity_boost,omitempty"`
+	Style               float64 `json:"style,omitempty"`
+	SpeakerBoost        bool    `json:"speaker_boost,omitempty"`
+	LatencyOptimization bool    `json:"latency_optimization,omitempty"`
+	OutputFormat        string  `json:"output_format,omitempty"`
 }
 
 // NewClient creates a new ElevenLabs client
@@ -46,12 +49,13 @@ func NewClient(apiKey string, options ...ClientOption) *Client {
 		apiKey:  apiKey,
 		baseURL: "https://api.elevenlabs.io/v1",
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 15 * time.Second,
 		},
-		voiceID:    "EXAVITQu4vr4xnSDxMaL",  // Default voice ID (Rachel)
-		modelID:    "eleven_monolingual_v1", // Default model
+		voiceID:    "EXAVITQu4vr4xnSDxMaL",
+		modelID:    "eleven_monolingual_v1",
 		stability:  0.5,
 		similarity: 0.75,
+		voiceStyle: 0.3,
 	}
 
 	for _, option := range options {
@@ -96,6 +100,13 @@ func WithSimilarity(similarity float64) ClientOption {
 	}
 }
 
+// WithVoiceStyle sets the voice style parameter for synthesis
+func WithVoiceStyle(style float64) ClientOption {
+	return func(c *Client) {
+		c.voiceStyle = style
+	}
+}
+
 // WithTimeout sets a custom timeout for HTTP requests
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
@@ -107,21 +118,27 @@ func WithTimeout(timeout time.Duration) ClientOption {
 func (c *Client) GenerateAudio(text string, options *VoiceOptions) (*VoiceResponse, error) {
 	if options == nil {
 		options = &VoiceOptions{
-			Stability:       c.stability,
-			SimilarityBoost: c.similarity,
-			Style:           0.0,
-			SpeakerBoost:    true,
+			Stability:           c.stability,
+			SimilarityBoost:     c.similarity,
+			Style:               c.voiceStyle,
+			SpeakerBoost:        true,
+			LatencyOptimization: true,
+			OutputFormat:        "mp3_44100_128",
 		}
 	}
 
 	requestData := struct {
-		Text          string        `json:"text"`
-		ModelID       string        `json:"model_id"`
-		VoiceSettings *VoiceOptions `json:"voice_settings"`
+		Text                     string        `json:"text"`
+		ModelID                  string        `json:"model_id"`
+		VoiceSettings            *VoiceOptions `json:"voice_settings"`
+		OptimizeStreamingLatency bool          `json:"optimize_streaming_latency,omitempty"`
+		OutputFormat             string        `json:"output_format,omitempty"`
 	}{
-		Text:          text,
-		ModelID:       c.modelID,
-		VoiceSettings: options,
+		Text:                     text,
+		ModelID:                  c.modelID,
+		VoiceSettings:            options,
+		OptimizeStreamingLatency: options.LatencyOptimization,
+		OutputFormat:             options.OutputFormat,
 	}
 
 	jsonData, err := json.Marshal(requestData)
@@ -161,7 +178,14 @@ func (c *Client) GenerateAudio(text string, options *VoiceOptions) (*VoiceRespon
 		contentType = "audio/mpeg"
 	}
 
-	duration := float64(len(audioData)) / 16000.0
+	bitRate := 128.0
+	if options.OutputFormat == "mp3_44100_128" {
+		bitRate = 128.0
+	} else if options.OutputFormat == "mp3_44100_64" {
+		bitRate = 64.0
+	}
+
+	duration := float64(len(audioData)*8) / (bitRate * 1000)
 
 	logger.Info("Generated audio from text",
 		"text_length", len(text),
@@ -187,10 +211,11 @@ func (c *Client) StreamAudio(text string, options *VoiceOptions) (<-chan []byte,
 
 		if options == nil {
 			options = &VoiceOptions{
-				Stability:       c.stability,
-				SimilarityBoost: c.similarity,
-				Style:           0.0,
-				SpeakerBoost:    true,
+				Stability:           c.stability,
+				SimilarityBoost:     c.similarity,
+				Style:               c.voiceStyle,
+				SpeakerBoost:        true,
+				LatencyOptimization: true,
 			}
 		}
 
@@ -199,11 +224,13 @@ func (c *Client) StreamAudio(text string, options *VoiceOptions) (<-chan []byte,
 			ModelID                      string        `json:"model_id"`
 			VoiceSettings                *VoiceOptions `json:"voice_settings"`
 			StreamingLatencyOptimization bool          `json:"streaming_latency_optimization"`
+			OutputFormat                 string        `json:"output_format,omitempty"`
 		}{
 			Text:                         text,
 			ModelID:                      c.modelID,
 			VoiceSettings:                options,
 			StreamingLatencyOptimization: true,
+			OutputFormat:                 options.OutputFormat,
 		}
 
 		jsonData, err := json.Marshal(requestData)
@@ -236,7 +263,7 @@ func (c *Client) StreamAudio(text string, options *VoiceOptions) (<-chan []byte,
 			return
 		}
 
-		buffer := make([]byte, 4096)
+		buffer := make([]byte, 8192)
 		for {
 			n, err := resp.Body.Read(buffer)
 			if n > 0 {

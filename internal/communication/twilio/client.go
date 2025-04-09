@@ -293,7 +293,9 @@ func GenerateTwiML(actions ...string) string {
 
 // SayAction creates a TwiML Say action
 func SayAction(message string, voice string, language string) string {
-	return fmt.Sprintf(`<Say voice="%s" language="%s">%s</Say>`, voice, language, message)
+	messageTemplate := `<prosody rate="1.15">%s</prosody>`
+	formattedMessage := fmt.Sprintf(messageTemplate, message)
+	return fmt.Sprintf(`<Say voice="%s" language="%s">%s</Say>`, voice, language, formattedMessage)
 }
 
 // PlayAction creates a TwiML Play action

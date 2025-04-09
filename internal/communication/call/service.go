@@ -147,6 +147,7 @@ func (s *Service) EndCall(callSID string) error {
 
 // ProcessSpeechInput handles patient speech input and returns the next response
 func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string, error) {
+	startTime := time.Now()
 	logger.Info("Processing speech input",
 		"call_sid", callSID,
 		"input", speechText,
@@ -166,13 +167,37 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 	totalQuestions := len(s.conversationManager.GetQuestions())
 	s.mu.Unlock()
 
+	refinedText := speechText
+	if len(speechText) > 0 && s.deepgramClient != nil {
+		if currentQuestionIndex > 0 && len(speechText) > 20 {
+			options := map[string]string{
+				"model":        "nova-2",
+				"language":     "en-US",
+				"punctuate":    "true",
+				"diarize":      "false",
+				"smart_format": "true",
+			}
+
+			textBytes := []byte(speechText)
+			response, err := s.deepgramClient.TranscribeAudio(textBytes, "text/plain", options)
+
+			if err == nil && response != nil && response.Confidence > 0.85 {
+				refinedText = response.Transcript
+				logger.Info("Refined transcription",
+					"original", speechText,
+					"refined", refinedText,
+					"confidence", response.Confidence)
+			}
+		}
+	}
+
 	logger.Info("Current question state",
 		"call_sid", callSID,
 		"current_question_index", currentQuestionIndex,
 		"total_questions", totalQuestions,
 		"conversation_id", conversationID)
 
-	if err := s.conversationManager.AddMessage(conversationID, conversation.MessageTypePatient, speechText); err != nil {
+	if err := s.conversationManager.AddMessage(conversationID, conversation.MessageTypePatient, refinedText); err != nil {
 		logger.Error("Failed to add patient message",
 			"error", err,
 			"conversation_id", conversationID)
@@ -180,7 +205,6 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 	}
 
 	nextQuestionIndex := currentQuestionIndex + 1
-
 	if nextQuestionIndex >= totalQuestions {
 		logger.Info("Reached last question, staying at final goodbye",
 			"call_sid", callSID,
@@ -189,14 +213,17 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 		nextQuestionIndex = totalQuestions - 1
 	}
 
-	logger.Info("Moving to next question in sequence",
-		"call_sid", callSID,
-		"from_question", currentQuestionIndex,
-		"to_question", nextQuestionIndex,
-		"total_questions", totalQuestions)
-
 	questionsList := s.conversationManager.GetQuestions()
 	nextQuestion := questionsList[nextQuestionIndex]
+
+	if nextQuestionIndex == totalQuestions-1 {
+		go func() {
+			_, err := s.GenerateAudioResponse(callSID, nextQuestion)
+			if err != nil {
+				logger.Error("Failed to preemptively generate audio", "error", err)
+			}
+		}()
+	}
 
 	logger.Info("Next question content",
 		"call_sid", callSID,
@@ -221,10 +248,14 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 			"total_questions", totalQuestions)
 
 		go func() {
-			time.Sleep(15 * time.Second)
-			logger.Info("Auto-ending call after final question",
+			estimatedDuration := float64(len(nextQuestion)) / 15.0
+			waitTime := time.Duration(estimatedDuration*1000)*time.Millisecond + 1500*time.Millisecond
+			time.Sleep(waitTime)
+
+			logger.Info("Auto-ending call immediately after final message",
 				"call_sid", callSID,
-				"question_counter", questionCount)
+				"estimated_message_duration", estimatedDuration)
+
 			if err := s.EndCall(callSID); err != nil {
 				logger.Error("Failed to automatically end call",
 					"error", err,
@@ -236,6 +267,7 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 	logger.Info("Generated next response",
 		"call_sid", callSID,
 		"response_length", len(nextQuestion),
+		"processing_time", time.Since(startTime),
 		"question_counter", questionCount,
 		"question_text", nextQuestion)
 
@@ -244,11 +276,14 @@ func (s *Service) ProcessSpeechInput(callSID string, speechText string) (string,
 
 // GenerateAudioResponse generates audio for a text response
 func (s *Service) GenerateAudioResponse(callSID string, text string) ([]byte, error) {
+	startTime := time.Now()
 	voiceResponse, err := s.elevenLabsClient.GenerateAudio(text, &elevenlabs.VoiceOptions{
-		Stability:       0.5,
-		SimilarityBoost: 0.75,
-		Style:           0.0,
-		SpeakerBoost:    true,
+		Stability:           0.65,
+		SimilarityBoost:     0.80,
+		Style:               0.35,
+		SpeakerBoost:        true,
+		LatencyOptimization: true,
+		OutputFormat:        "mp3_44100_128",
 	})
 
 	if err != nil {
@@ -263,7 +298,8 @@ func (s *Service) GenerateAudioResponse(callSID string, text string) ([]byte, er
 	logger.Info("Generated audio response",
 		"call_sid", callSID,
 		"audio_size", len(voiceResponse.AudioBytes),
-		"duration", voiceResponse.Duration)
+		"duration", voiceResponse.Duration,
+		"generation_time", time.Since(startTime))
 
 	return voiceResponse.AudioBytes, nil
 }
@@ -455,7 +491,6 @@ func twilioErrorResponse(message string) string {
 
 // SimpleConversationFlow handles a complete call conversation with sequential questions
 func (s *Service) SimpleConversationFlow(patientPhone string) (string, error) {
-	// Step 1: Start the call
 	callSID, err := s.InitiateCall(patientPhone)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate call: %w", err)
@@ -520,86 +555,6 @@ func (s *Service) ProcessConversationToCase(conversationID string) (string, erro
 	return caseID, nil
 }
 
-// SimplifiedHandleIncomingCall provides a simpler implementation for call handling
-func (s *Service) SimplifiedHandleIncomingCall(c *gin.Context, event twilio.CallEvent) (string, error) {
-	callSID := event.CallSID
-	patientPhone := event.From
-
-	s.mu.Lock()
-	session, exists := s.activeSessions[callSID]
-	if !exists {
-		conv, err := s.conversationManager.StartConversation(patientPhone)
-		if err != nil {
-			s.mu.Unlock()
-			return "We're experiencing technical difficulties. Please try again later.", err
-		}
-
-		session = &CallSession{
-			CallSID:         callSID,
-			ConversationID:  conv.ID,
-			PatientPhone:    patientPhone,
-			IsActive:        true,
-			StartTime:       time.Now(),
-			LastActivity:    time.Now(),
-			QuestionCounter: 0,
-		}
-		s.activeSessions[callSID] = session
-	}
-	s.mu.Unlock()
-
-	questions := s.conversationManager.GetQuestions()
-	if session.QuestionCounter >= len(questions) {
-		questionText := questions[len(questions)-1]
-
-		go func() {
-			time.Sleep(10 * time.Second)
-			s.EndCall(callSID)
-		}()
-
-		return twilio.GenerateTwiML(
-			twilio.SayAction(questionText, "alice", "en-US"),
-		), nil
-	}
-
-	questionText := questions[session.QuestionCounter]
-
-	s.conversationManager.AddMessage(session.ConversationID, conversation.MessageTypeAI, questionText)
-
-	actionURL := fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID)
-
-	return twilio.GenerateTwiML(
-		twilio.SayAction(questionText, "alice", "en-US"),
-		twilio.GatherAction("", map[string]string{
-			"input":         "speech",
-			"action":        actionURL,
-			"language":      "en-US",
-			"speechTimeout": "5",
-			"timeout":       "15",
-		}),
-	), nil
-}
-
-// IncrementQuestionCounter advances to the next question
-func (s *Service) IncrementQuestionCounter(callSID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	session, exists := s.activeSessions[callSID]
-	if !exists {
-		return fmt.Errorf("no active session for call %s", callSID)
-	}
-
-	session.QuestionCounter++
-	session.LastActivity = time.Now()
-
-	return nil
-}
-
-// GetConversationManager returns the conversation manager
-func (s *Service) GetConversationManager() *conversation.ConversationManager {
-	return s.conversationManager
-}
-
 // HandleInboundCall processes calls initiated by patients to your Twilio number
 func (s *Service) HandleInboundCall(c *gin.Context, event twilio.CallEvent) (string, error) {
 	callSID := event.CallSID
@@ -653,14 +608,25 @@ func (s *Service) HandleInboundCall(c *gin.Context, event twilio.CallEvent) (str
 			logger.Error("Failed to add goodbye message", "error", err)
 		}
 
+		goodbyeTwiML := twilio.GenerateTwiML(
+			twilio.SayAction(questionText, "Polly.Matthew-Neural", "en-US"),
+			"<Hangup/>",
+		)
+
 		go func() {
-			time.Sleep(10 * time.Second)
-			s.EndCall(callSID)
+			s.mu.Lock()
+			if session, exists := s.activeSessions[callSID]; exists {
+				session.IsActive = false
+				s.activeSessions[callSID] = session
+			}
+			s.mu.Unlock()
+
+			time.Sleep(200 * time.Millisecond)
+
+			go s.processCallResults(callSID)
 		}()
 
-		return twilio.GenerateTwiML(
-			twilio.SayAction(questionText, "alice", "en-US"),
-		), nil
+		return goodbyeTwiML, nil
 	}
 
 	questionText := questions[session.QuestionCounter]
@@ -677,13 +643,111 @@ func (s *Service) HandleInboundCall(c *gin.Context, event twilio.CallEvent) (str
 		"question_text", questionText)
 
 	return twilio.GenerateTwiML(
-		twilio.SayAction(questionText, "alice", "en-US"),
+		twilio.SayAction(questionText, "Polly.Matthew-Neural", "en-US"),
 		twilio.GatherAction("", map[string]string{
-			"input":         "speech",
-			"action":        actionURL,
-			"language":      "en-US",
-			"speechTimeout": "5",
-			"timeout":       "15",
+			"input":             "speech",
+			"action":            actionURL,
+			"language":          "en-US",
+			"speechTimeout":     "1",
+			"timeout":           "8",
+			"profanityFilter":   "false",
+			"interdigitTimeout": "1",
+			"enhanced":          "true",
+			"speechModel":       "phone_call",
 		}),
 	), nil
+}
+
+// SimplifiedHandleIncomingCall provides a simpler implementation for call handling
+func (s *Service) SimplifiedHandleIncomingCall(c *gin.Context, event twilio.CallEvent) (string, error) {
+	callSID := event.CallSID
+	patientPhone := event.From
+
+	s.mu.Lock()
+	session, exists := s.activeSessions[callSID]
+	if !exists {
+		conv, err := s.conversationManager.StartConversation(patientPhone)
+		if err != nil {
+			s.mu.Unlock()
+			return "We're experiencing technical difficulties. Please try again later.", err
+		}
+
+		session = &CallSession{
+			CallSID:         callSID,
+			ConversationID:  conv.ID,
+			PatientPhone:    patientPhone,
+			IsActive:        true,
+			StartTime:       time.Now(),
+			LastActivity:    time.Now(),
+			QuestionCounter: 0,
+		}
+		s.activeSessions[callSID] = session
+	}
+	s.mu.Unlock()
+
+	questions := s.conversationManager.GetQuestions()
+	if session.QuestionCounter >= len(questions) {
+		questionText := questions[len(questions)-1]
+
+		goodbyeTwiML := twilio.GenerateTwiML(
+			twilio.SayAction(questionText, "Polly.Matthew-Neural", "en-US"),
+			"<Hangup/>",
+		)
+
+		go func() {
+			s.mu.Lock()
+			if session, exists := s.activeSessions[callSID]; exists {
+				session.IsActive = false
+				s.activeSessions[callSID] = session
+			}
+			s.mu.Unlock()
+
+			time.Sleep(200 * time.Millisecond)
+
+			go s.processCallResults(callSID)
+		}()
+
+		return goodbyeTwiML, nil
+	}
+
+	questionText := questions[session.QuestionCounter]
+
+	s.conversationManager.AddMessage(session.ConversationID, conversation.MessageTypeAI, questionText)
+
+	actionURL := fmt.Sprintf("%s/api/call/speech?call_sid=%s", s.baseURL, callSID)
+
+	return twilio.GenerateTwiML(
+		twilio.SayAction(questionText, "Polly.Matthew-Neural", "en-US"),
+		twilio.GatherAction("", map[string]string{
+			"input":           "speech",
+			"action":          actionURL,
+			"language":        "en-US",
+			"speechTimeout":   "1",
+			"timeout":         "8",
+			"profanityFilter": "false",
+			"enhanced":        "true",
+			"speechModel":     "phone_call",
+		}),
+	), nil
+}
+
+// IncrementQuestionCounter advances to the next question
+func (s *Service) IncrementQuestionCounter(callSID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, exists := s.activeSessions[callSID]
+	if !exists {
+		return fmt.Errorf("no active session for call %s", callSID)
+	}
+
+	session.QuestionCounter++
+	session.LastActivity = time.Now()
+
+	return nil
+}
+
+// GetConversationManager returns the conversation manager
+func (s *Service) GetConversationManager() *conversation.ConversationManager {
+	return s.conversationManager
 }
