@@ -50,12 +50,16 @@ PRESENTING SYMPTOMS:
 VITAL SIGNS:
 {{.Vitals}}
 
+LABORATORY RESULTS:
+{{.LabResults}}
+
 ASSESSMENT INSTRUCTIONS:
-1. Consider the most likely diagnoses based on the symptoms, vital signs, and patient history
+1. Consider the most likely diagnoses based on the symptoms, vital signs, lab results, and patient history
 2. For each potential diagnosis, provide medical reasoning explaining why it's a possibility
 3. Note any relevant risk factors present in the patient profile
 4. Suggest appropriate diagnostic tests to confirm or rule out each diagnosis
 5. Assign a confidence level (0-100%) for your primary diagnosis based on available information
+6. Pay special attention to abnormal lab values and their clinical significance
 
 FORMAT YOUR RESPONSE AS JSON:
 {
@@ -70,7 +74,8 @@ DIAGNOSTIC CONSIDERATIONS:
 - Consider both common and uncommon causes of the presenting symptoms
 - Pay special attention to any red flag symptoms that could indicate serious conditions
 - Consider how medications and existing conditions might affect the presentation
-- Think about age and gender-specific conditions that match the symptom profile`,
+- Think about age and gender-specific conditions that match the symptom profile
+- Integrate abnormal lab findings in your diagnostic reasoning`,
 	}, nil
 }
 
@@ -201,6 +206,8 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 	gender := getString(patientData, "gender")
 	vitals := getMap(patientData, "vitals")
 
+	documentAnalyses := extractDocumentAnalyses(patientData)
+
 	var relatedConditions []knowledge.Condition
 	if a.knowledgeBase != nil {
 		relatedConditions = a.knowledgeBase.GetRelatedConditions(symptoms)
@@ -232,6 +239,9 @@ func (a *DiagnosticActor) analyzeSymptoms(ctx context.Context, patientData map[s
 		vitalsText += fmt.Sprintf("Oxygen Saturation: %.0f%%\n", o2)
 	}
 	prompt = strings.ReplaceAll(prompt, "{{.Vitals}}", vitalsText)
+
+	labResultsText := formatLabResults(documentAnalyses)
+	prompt = strings.ReplaceAll(prompt, "{{.LabResults}}", labResultsText)
 
 	if len(relatedConditions) > 0 {
 		prompt += "\n\nMEDICAL KNOWLEDGE BASE INFORMATION:\n"
@@ -487,4 +497,130 @@ func validateAndNormalizeDiagnosticResponse(diagnosis map[string]any) {
 			diagnosis["confidence"] = 0.5
 		}
 	}
+}
+
+// extractDocumentAnalyses retrieves document analyses from patient data
+func extractDocumentAnalyses(patientData map[string]any) []map[string]any {
+	if patientData == nil {
+		return nil
+	}
+
+	docAnalysesRaw, exists := patientData["document_analyses"]
+	if !exists {
+		return nil
+	}
+
+	if docAnalyses, ok := docAnalysesRaw.([]map[string]any); ok {
+		return docAnalyses
+	}
+
+	if docAnalysesAny, ok := docAnalysesRaw.([]any); ok {
+		result := make([]map[string]any, 0, len(docAnalysesAny))
+		for _, item := range docAnalysesAny {
+			if itemMap, ok := item.(map[string]any); ok {
+				result = append(result, itemMap)
+			}
+		}
+		return result
+	}
+
+	return nil
+}
+
+// formatLabResults creates a formatted string of lab results from document analyses
+func formatLabResults(documentAnalyses []map[string]any) string {
+	if len(documentAnalyses) == 0 {
+		return "No lab results available."
+	}
+
+	var labText strings.Builder
+	for _, doc := range documentAnalyses {
+		analysisData, ok := doc["analysis"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		var pages []any
+		if pagesData, ok := analysisData["pages"].([]any); ok {
+			pages = pagesData
+		} else {
+			pages = []any{analysisData}
+		}
+
+		for i, pageAny := range pages {
+			page, ok := pageAny.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if i > 0 {
+				labText.WriteString("\n")
+			}
+
+			if docType, ok := doc["type"].(string); ok {
+				labText.WriteString(fmt.Sprintf("Document Type: %s\n", docType))
+			}
+
+			if findings, ok := getStringSliceFromMap(page, "findings"); ok && len(findings) > 0 {
+				labText.WriteString("Findings:\n")
+				for _, finding := range findings {
+					labText.WriteString(fmt.Sprintf("- %s\n", finding))
+				}
+			}
+
+			if abnormalValues, ok := getStringSliceFromMap(page, "abnormal_values"); ok && len(abnormalValues) > 0 {
+				labText.WriteString("Abnormal Values:\n")
+				for _, value := range abnormalValues {
+					labText.WriteString(fmt.Sprintf("- %s\n", value))
+				}
+			}
+
+			if keyValues, ok := page["key_values"].(map[string]any); ok && len(keyValues) > 0 {
+				labText.WriteString("Key Measurements:\n")
+				for key, value := range keyValues {
+					labText.WriteString(fmt.Sprintf("- %s: %v\n", key, value))
+				}
+			}
+
+			if interpretation, ok := page["interpretation"].(string); ok && interpretation != "" {
+				labText.WriteString(fmt.Sprintf("Interpretation: %s\n", interpretation))
+			}
+		}
+	}
+
+	return labText.String()
+}
+
+// getStringSliceFromMap extracts a string slice from a map, handling different types
+func getStringSliceFromMap(data map[string]any, key string) ([]string, bool) {
+	if data == nil {
+		return nil, false
+	}
+
+	val, exists := data[key]
+	if !exists {
+		return nil, false
+	}
+
+	if strSlice, ok := val.([]string); ok {
+		return strSlice, true
+	}
+
+	if anySlice, ok := val.([]any); ok {
+		result := make([]string, 0, len(anySlice))
+		for _, item := range anySlice {
+			if str, ok := item.(string); ok {
+				result = append(result, str)
+			} else {
+				result = append(result, fmt.Sprintf("%v", item))
+			}
+		}
+		return result, true
+	}
+
+	if str, ok := val.(string); ok {
+		return []string{str}, true
+	}
+
+	return nil, false
 }

@@ -128,6 +128,8 @@ func (a *Application) initActorSystem() error {
 	if exists {
 		a.workflowEngine.SetOrchestrator(orchestrator)
 		a.workflowEngine.SetResultRepository(a.container.ResultRepo)
+		a.workflowEngine.SetDocumentRepository(a.container.DocumentRepo)
+		logger.Info("Set document repository in workflow engine")
 	}
 
 	logger.Info("Listing all registered actors")

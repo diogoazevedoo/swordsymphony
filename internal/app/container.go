@@ -139,7 +139,6 @@ func (c *Container) initRepositories() error {
 
 // Initialize document service
 func (c *Container) initDocumentService() {
-	// Create upload path if it doesn't exist
 	uploadPath := filepath.Join("data", "documents")
 
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
@@ -215,6 +214,12 @@ func (c *Container) initConversationServices() error {
 
 	workflowEngine.SetResultRepository(c.ResultRepo)
 	workflowEngine.SetDocumentRepository(c.DocumentRepo)
+
+	if _, ok := workflowEngine.GetDocumentRepository(); !ok {
+		logger.Warn("Failed to set document repository in workflow engine")
+	} else {
+		logger.Info("Document repository successfully set in workflow engine")
+	}
 
 	baseURL := c.Config.Twilio.WebhookBaseURL
 

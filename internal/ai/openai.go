@@ -383,103 +383,153 @@ func (c *openAIClient) analyzePDFDocument(ctx context.Context, filePath string, 
 
 // analyzeDocumentWithVision performs analysis using GPT-4o's vision capabilities when text extraction fails
 func (c *openAIClient) analyzeDocumentWithVision(ctx context.Context, filePath string, documentType string) (map[string]any, error) {
-	imagePath, err := convertPDFToImage(filePath)
+	imagePaths, err := convertPDFToImages(filePath)
 	if err != nil {
-		logger.Error("Failed to convert PDF to image", "path", filePath, "error", err)
+		logger.Error("Failed to convert PDF to images", "path", filePath, "error", err)
 		return map[string]any{
-			"error":      fmt.Sprintf("Failed to convert PDF to image: %v", err),
+			"error":      fmt.Sprintf("Failed to convert PDF to images: %v", err),
 			"confidence": 0.0,
-			"text":       "Could not convert the PDF to an image for analysis.",
+			"text":       "Could not convert the PDF to images for analysis.",
 		}, nil
 	}
-	defer os.Remove(imagePath)
+	defer func() {
+		for _, path := range imagePaths {
+			os.Remove(path)
+		}
+	}()
 
-	imageData, err := os.ReadFile(imagePath)
-	if err != nil {
-		logger.Error("Failed to read converted image", "path", imagePath, "error", err)
-		return map[string]any{
-			"error":      fmt.Sprintf("Failed to read converted image: %v", err),
-			"confidence": 0.0,
-			"text":       "Could not read the converted image for analysis.",
-		}, nil
+	combinedResult := map[string]any{
+		"pages":      []map[string]any{},
+		"confidence": 0.0,
+		"method":     "vision",
 	}
 
-	base64Data := base64.StdEncoding.EncodeToString(imageData)
+	for pageIndex, imagePath := range imagePaths {
+		imageData, err := os.ReadFile(imagePath)
+		if err != nil {
+			logger.Error("Failed to read converted image", "path", imagePath, "error", err)
+			continue
+		}
 
-	visPrompt := c.getVisionPromptForDocumentType(documentType)
+		base64Data := base64.StdEncoding.EncodeToString(imageData)
 
-	messages := []map[string]interface{}{
-		{
-			"role":    "system",
-			"content": visPrompt,
-		},
-		{
-			"role": "user",
-			"content": []map[string]interface{}{
-				{
-					"type": "text",
-					"text": fmt.Sprintf("Please analyze this %s document and respond with valid JSON ONLY. This is a page from a PDF document.", documentType),
-				},
-				{
-					"type": "image_url",
-					"image_url": map[string]interface{}{
-						"url":    fmt.Sprintf("data:image/jpeg;base64,%s", base64Data),
-						"detail": "high",
+		visPrompt := c.getVisionPromptForDocumentType(documentType)
+
+		messages := []map[string]interface{}{
+			{
+				"role":    "system",
+				"content": visPrompt,
+			},
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": fmt.Sprintf("Please analyze this %s document and respond with valid JSON ONLY. This is page %d of a PDF document.", documentType, pageIndex+1),
+					},
+					{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url":    fmt.Sprintf("data:image/jpeg;base64,%s", base64Data),
+							"detail": "high",
+						},
 					},
 				},
 			},
-		},
-	}
+		}
 
-	result, err := c.sendVisionRequest(ctx, "gpt-4o", messages)
-	if err != nil {
-		logger.Warn("GPT-4o vision analysis failed, falling back to GPT-4o-mini", "error", err)
-		result, err = c.sendVisionRequest(ctx, "gpt-4o-mini", messages)
+		result, err := c.sendVisionRequest(ctx, "gpt-4o", messages)
 		if err != nil {
-			return nil, fmt.Errorf("all vision models failed: %w", err)
+			logger.Warn("GPT-4o vision analysis failed, falling back to GPT-4o-mini", "page", pageIndex+1, "error", err)
+			result, err = c.sendVisionRequest(ctx, "gpt-4o-mini", messages)
+			if err != nil {
+				logger.Error("Vision model failed for page", "page", pageIndex+1, "error", err)
+				continue
+			}
+		}
+
+		result["page_number"] = pageIndex + 1
+
+		if pageResults, ok := combinedResult["pages"].([]map[string]any); ok {
+			combinedResult["pages"] = append(pageResults, result)
+		}
+
+		if conf, ok := result["confidence"].(float64); ok {
+			currentConf := combinedResult["confidence"].(float64)
+			numPages := len(combinedResult["pages"].([]map[string]any))
+			combinedResult["confidence"] = (currentConf*float64(numPages-1) + conf) / float64(numPages)
 		}
 	}
 
-	return result, nil
-}
-
-// convertPDFToImage converts the first page of a PDF file to a JPEG image
-func convertPDFToImage(pdfPath string) (string, error) {
-	tmpDir := filepath.Join(os.TempDir(), "pdf_images")
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create temporary directory: %w", err)
+	if len(combinedResult["pages"].([]map[string]any)) == 0 {
+		return map[string]any{
+			"error":      "Failed to analyze any page of the PDF document",
+			"confidence": 0.0,
+			"method":     "vision",
+		}, nil
 	}
 
-	outputImagePath := filepath.Join(tmpDir, fmt.Sprintf("%d.jpg", time.Now().UnixNano()))
+	return combinedResult, nil
+}
+
+// convertPDFToImages converts all pages of a PDF file to JPEG images
+func convertPDFToImages(pdfPath string) ([]string, error) {
+	tmpDir := filepath.Join(os.TempDir(), "pdf_images")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create temporary directory: %w", err)
+	}
 
 	doc, err := fitz.New(pdfPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to open PDF with fitz: %w", err)
+		return nil, fmt.Errorf("failed to open PDF with fitz: %w", err)
 	}
 	defer doc.Close()
 
-	if doc.NumPage() < 1 {
-		return "", fmt.Errorf("PDF has no pages")
+	totalPages := doc.NumPage()
+	if totalPages < 1 {
+		return nil, fmt.Errorf("PDF has no pages")
 	}
 
-	img, err := doc.Image(0)
-	if err != nil {
-		return "", fmt.Errorf("failed to extract image from PDF: %w", err)
+	maxPages := 10
+	if totalPages > maxPages {
+		logger.Warn("PDF has too many pages, limiting analysis", "total_pages", totalPages, "max_pages", maxPages)
+		totalPages = maxPages
 	}
 
-	file, err := os.Create(outputImagePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer file.Close()
+	imagePaths := make([]string, 0, totalPages)
 
-	err = jpeg.Encode(file, img, &jpeg.Options{Quality: 90})
-	if err != nil {
-		return "", fmt.Errorf("failed to encode image: %w", err)
+	for pageIndex := 0; pageIndex < totalPages; pageIndex++ {
+		outputImagePath := filepath.Join(tmpDir, fmt.Sprintf("%d_page_%d.jpg", time.Now().UnixNano(), pageIndex+1))
+
+		img, err := doc.Image(pageIndex)
+		if err != nil {
+			logger.Warn("Failed to extract image from PDF page", "page", pageIndex+1, "error", err)
+			continue
+		}
+
+		file, err := os.Create(outputImagePath)
+		if err != nil {
+			logger.Warn("Failed to create output file for page", "page", pageIndex+1, "error", err)
+			continue
+		}
+
+		err = jpeg.Encode(file, img, &jpeg.Options{Quality: 90})
+		file.Close()
+		if err != nil {
+			logger.Warn("Failed to encode image for page", "page", pageIndex+1, "error", err)
+			os.Remove(outputImagePath)
+			continue
+		}
+
+		logger.Info("Successfully converted PDF page to image", "pdf", pdfPath, "page", pageIndex+1, "image", outputImagePath)
+		imagePaths = append(imagePaths, outputImagePath)
 	}
 
-	logger.Info("Successfully converted PDF to image", "pdf", pdfPath, "image", outputImagePath)
-	return outputImagePath, nil
+	if len(imagePaths) == 0 {
+		return nil, fmt.Errorf("failed to convert any page of the PDF to images")
+	}
+
+	return imagePaths, nil
 }
 
 // sendVisionRequest sends a request to the specified vision model and processes the response
