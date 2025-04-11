@@ -131,6 +131,7 @@ type WorkflowEngine struct {
 	instances          map[uuid.UUID]*WorkflowInstance
 	orchestratorRef    any
 	resultRepository   repository.ResultRepository
+	documentRepository repository.DocumentRepository
 	agentConfigService *config.AgentConfigService
 	mu                 sync.RWMutex
 }
@@ -878,6 +879,45 @@ func (e *WorkflowEngine) executeTaskStep(ctx context.Context, state *WorkflowSta
 			patientData["case_id"] = caseID
 
 			inputData["case_id"] = caseID
+		}
+	}
+
+	if caseID != "" && (step.AgentType == "intake_agent" || strings.Contains(step.AgentType, "intake")) {
+		if docRepo, ok := e.GetDocumentRepository(); ok {
+			documents, err := docRepo.GetDocumentsByCaseID(caseID)
+			if err != nil {
+				logger.Warn("Failed to get documents for case",
+					"case_id", caseID,
+					"error", err)
+			} else if len(documents) > 0 {
+				logger.Info("Adding document analyses to intake data",
+					"case_id", caseID,
+					"document_count", len(documents))
+
+				documentAnalyses := make([]map[string]any, 0, len(documents))
+				for _, doc := range documents {
+					if doc.Analysis != nil && len(doc.Analysis) > 0 {
+						docInfo := map[string]any{
+							"id":           doc.ID,
+							"name":         doc.Name,
+							"type":         string(doc.Type),
+							"content_type": doc.ContentType,
+							"file_url":     doc.FileURL,
+							"analysis":     doc.Analysis,
+						}
+						documentAnalyses = append(documentAnalyses, docInfo)
+					}
+				}
+
+				if len(documentAnalyses) > 0 {
+					patientData["document_analyses"] = documentAnalyses
+					logger.Info("Added document analyses to intake data",
+						"case_id", caseID,
+						"analysis_count", len(documentAnalyses))
+				}
+			}
+		} else {
+			logger.Warn("Document repository not available, cannot fetch document analyses")
 		}
 	}
 
@@ -1667,4 +1707,25 @@ func (e *WorkflowEngine) GetResultRepository() repository.ResultRepository {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.resultRepository
+}
+
+// SetDocumentRepository sets the document repository for the workflow engine
+func (e *WorkflowEngine) SetDocumentRepository(repo repository.DocumentRepository) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.documentRepository = repo
+	logger.Info("Document repository set for workflow engine")
+}
+
+// GetDocumentRepository returns the workflow engine's document repository
+func (e *WorkflowEngine) GetDocumentRepository() (repository.DocumentRepository, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if e.documentRepository != nil {
+		return e.documentRepository, true
+	}
+
+	return nil, false
 }

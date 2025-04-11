@@ -53,9 +53,16 @@ func (a *IntakeActor) Receive(ctx context.Context, envelope *actor.Envelope) err
 
 	taskID, _ := msg.Content["task_id"].(string)
 	patientData, _ := msg.Content["data"].(map[string]any)
+	documentAnalyses, hasDocAnalyses := msg.Content["document_analyses"]
 	threadID := msg.ThreadID
 
 	processedData := a.processPatientData(patientData)
+
+	if hasDocAnalyses {
+		logger.Info("Including document analyses in processed data",
+			"has_analyses", hasDocAnalyses)
+		processedData["document_analyses"] = documentAnalyses
+	}
 
 	a.SetState("current_patient", processedData)
 

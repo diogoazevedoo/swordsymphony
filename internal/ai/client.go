@@ -19,6 +19,9 @@ type Client interface {
 
 	// GenerateEmbedding creates vector embeddings for text
 	GenerateEmbedding(ctx context.Context, text string) ([]float64, error)
+
+	// AnalyzeDocument analyzes a document (PDF, image, etc.) and returns structured analysis
+	AnalyzeDocument(ctx context.Context, filePath string, contentType string, documentType string) (map[string]any, error)
 }
 
 // CompletionOptions contains parameters for the completion request

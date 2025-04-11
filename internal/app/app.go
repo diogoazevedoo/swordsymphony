@@ -160,9 +160,13 @@ func (a *Application) initServer() error {
 		a.container.CallService,
 	)
 
+	docH := handler.NewDocumentHandler(
+		a.container.DocumentService,
+	)
+
 	address := fmt.Sprintf(":%s", a.container.Config.Server.Port)
 	a.server = server.NewServer(address)
-	a.server.SetupRoutes(h, adminH, callH)
+	a.server.SetupRoutes(h, adminH, callH, docH)
 
 	return nil
 }

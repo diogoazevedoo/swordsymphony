@@ -1,6 +1,9 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/diogoazevedoo/swordsymphony/internal/ai"
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/call"
 	"github.com/diogoazevedoo/swordsymphony/internal/communication/deepgram"
@@ -15,25 +18,29 @@ import (
 	"github.com/diogoazevedoo/swordsymphony/internal/repository"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/memory"
 	"github.com/diogoazevedoo/swordsymphony/internal/repository/postgres"
+	"github.com/diogoazevedoo/swordsymphony/internal/service"
 	"github.com/diogoazevedoo/swordsymphony/internal/workflow"
 )
 
 // Container manages application dependencies
 type Container struct {
-	Config              *config.Config
-	AIClient            ai.Client
-	AIFactory           ai.Factory
-	KnowledgeBase       *knowledge.MedicalKnowledgeBase
-	CaseRepo            repository.CaseRepository
-	ResultRepo          repository.ResultRepository
-	TwilioClient        *twilio.Client
-	ElevenLabsClient    *elevenlabs.Client
-	DeepgramClient      *deepgram.Client
-	EmailSender         *email.Sender
-	ConversationManager *conversation.ConversationManager
-	WorkflowService     *workflow.WorkflowService
-	TranscriptProcessor *processing.TranscriptProcessor
-	CallService         *call.Service
+	Config               *config.Config
+	AIClient             ai.Client
+	AIFactory            ai.Factory
+	KnowledgeBase        *knowledge.MedicalKnowledgeBase
+	CaseRepo             repository.CaseRepository
+	ResultRepo           repository.ResultRepository
+	DocumentRepo         repository.DocumentRepository
+	DocumentAnalysisRepo repository.DocumentAnalysisRepository
+	TwilioClient         *twilio.Client
+	ElevenLabsClient     *elevenlabs.Client
+	DeepgramClient       *deepgram.Client
+	EmailSender          *email.Sender
+	ConversationManager  *conversation.ConversationManager
+	WorkflowService      *workflow.WorkflowService
+	TranscriptProcessor  *processing.TranscriptProcessor
+	CallService          *call.Service
+	DocumentService      *service.DocumentService
 }
 
 // NewContainer creates a new dependency container
@@ -98,11 +105,15 @@ func (c *Container) initRepositories() error {
 		if err == nil {
 			c.CaseRepo = postgres.NewCaseRepository(db)
 			c.ResultRepo = postgres.NewResultRepository(db)
-			logger.Info("Using PostgreSQL repositories")
+			c.DocumentRepo = postgres.NewDocumentRepository(db)
+			c.DocumentAnalysisRepo = postgres.NewDocumentAnalysisRepository(db)
+			logger.Info("Using PostgreSQL repositories for cases, results, documents, and document analysis")
 
 			if err := c.CaseRepo.InitializeDemoCases(); err != nil {
 				return err
 			}
+
+			c.initDocumentService()
 
 			return nil
 		}
@@ -113,13 +124,41 @@ func (c *Container) initRepositories() error {
 
 	c.CaseRepo = memory.NewCaseRepository()
 	c.ResultRepo = memory.NewResultRepository()
+	c.DocumentRepo = memory.NewDocumentRepository()
+	c.DocumentAnalysisRepo = memory.NewDocumentAnalysisRepository()
 	logger.Info("Using in-memory repositories")
 
 	if err := c.CaseRepo.InitializeDemoCases(); err != nil {
 		return err
 	}
 
+	c.initDocumentService()
+
 	return nil
+}
+
+// Initialize document service
+func (c *Container) initDocumentService() {
+	// Create upload path if it doesn't exist
+	uploadPath := filepath.Join("data", "documents")
+
+	if err := os.MkdirAll(uploadPath, 0755); err != nil {
+		logger.Error("Failed to create document upload directory", "path", uploadPath, "error", err)
+	}
+
+	baseURL := c.Config.Twilio.WebhookBaseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:" + c.Config.Server.Port
+	}
+
+	c.DocumentService = service.NewDocumentService(
+		c.DocumentRepo,
+		c.DocumentAnalysisRepo,
+		uploadPath,
+		baseURL,
+		c.AIClient,
+	)
+	logger.Info("Document service initialized", "upload_path", uploadPath)
 }
 
 // Initialize communication services
@@ -173,6 +212,9 @@ func (c *Container) initConversationServices() error {
 	if err := workflowService.Initialize(); err != nil {
 		logger.Warn("Failed to initialize workflow service", "error", err)
 	}
+
+	workflowEngine.SetResultRepository(c.ResultRepo)
+	workflowEngine.SetDocumentRepository(c.DocumentRepo)
 
 	baseURL := c.Config.Twilio.WebhookBaseURL
 

@@ -115,16 +115,26 @@ func (o *OrchestratorActor) StartTask(taskDetails map[string]any) domain.TaskInf
 	thread.AgentsInvolved[string(domain.IntakeAgentType)] = true
 	thread.AgentStatus[string(domain.IntakeAgentType)] = domain.AgentBusy
 
+	messageContent := map[string]any{
+		"task_id": thread.TaskID.String(),
+		"action":  "process_patient_data",
+		"data":    taskDetails["patient_data"],
+	}
+
+	if patientData, ok := taskDetails["patient_data"].(map[string]any); ok {
+		if documentAnalyses, ok := patientData["document_analyses"]; ok {
+			logger.Info("Including document analyses in intake task message",
+				"document_analyses_present", true)
+			messageContent["document_analyses"] = documentAnalyses
+		}
+	}
+
 	taskMsg := domain.NewMessage(
 		string(o.Address()),
 		"Orchestrator",
 		string(domain.IntakeAgentType),
 		domain.TaskAssignment,
-		map[string]any{
-			"task_id": thread.TaskID.String(),
-			"action":  "process_patient_data",
-			"data":    taskDetails["patient_data"],
-		},
+		messageContent,
 	)
 	taskMsg.ThreadID = thread.ThreadID
 

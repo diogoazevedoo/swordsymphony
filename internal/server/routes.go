@@ -6,7 +6,7 @@ import (
 )
 
 // SetupRoutes configures all the routes for the API
-func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.ManagementHandler, callH *handler.CallController) {
+func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.ManagementHandler, callH *handler.CallController, docH *handler.DocumentHandler) {
 	api := s.router.Group("/api")
 	api.Use(middleware.CORS())
 	api.Use(middleware.RequestLogger())
@@ -31,6 +31,13 @@ func (s *Server) SetupRoutes(h *handler.ActorHandler, managementH *handler.Manag
 		api.GET("/agents/:agent_id", h.GetAgentDetails)
 
 		api.GET("/messages", h.GetMessages)
+
+		api.POST("/documents/upload/:case_id", docH.UploadDocument)
+		api.GET("/documents/case/:case_id", docH.GetDocuments)
+		api.GET("/documents/:document_id", docH.GetDocument)
+		api.GET("/documents/:document_id/file", docH.GetDocumentFile)
+		api.GET("/documents/:document_id/analysis", docH.GetDocumentAnalysis)
+		api.DELETE("/documents/:document_id", docH.DeleteDocument)
 
 		call := api.Group("/call")
 		{
